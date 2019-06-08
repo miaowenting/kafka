@@ -21,6 +21,8 @@ import java.util.Objects;
 
 /**
  * A topic name and partition number
+ *
+ * TopicPartition 表示某Topic的一个分区，其中的topic字段是Topic的名称，partition字段则此分区在Topic中的分区编号(ID)。
  */
 public final class TopicPartition implements Serializable {
     private static final long serialVersionUID = -613627415771699627L;

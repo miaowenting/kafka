@@ -50,12 +50,23 @@ public class DefaultPartitioner implements Partitioner {
      * @param value The value to partition on or null
      * @param valueBytes serialized value to partition on or null
      * @param cluster The current cluster metadata
+     *
+     *
+     * DefaultPartitioner.partition(方法负责在ProduceRecord中没有明确指定分区编号的时候，
+     * 为其选择合适的分区:如果消息没有key,会根据counter与Partition个数取模来确定分区编号,
+     *                count 不断递增,确保消息不会都发到同-一个Partition里;如果消息有key的话,
+     *                则对key进行hash(使用的是murmur2这种高效率低碰撞的Hash算法)，然后与分区数
+     *                量取模，来确定key所在的分区达到负载均衡。
      */
     public int partition(String topic, Object key, byte[] keyBytes, Object value, byte[] valueBytes, Cluster cluster) {
+        // 从Cluster中获取对应的Topicd的分区信息
         List<PartitionInfo> partitions = cluster.partitionsForTopic(topic);
+        // 分区数量
         int numPartitions = partitions.size();
+        // 消息没有key的情况
         if (keyBytes == null) {
             int nextValue = nextValue(topic);
+            // 获取availablePartitions
             List<PartitionInfo> availablePartitions = cluster.availablePartitionsForTopic(topic);
             if (availablePartitions.size() > 0) {
                 int part = Utils.toPositive(nextValue) % availablePartitions.size();
@@ -65,6 +76,7 @@ public class DefaultPartitioner implements Partitioner {
                 return Utils.toPositive(nextValue) % numPartitions;
             }
         } else {
+            // 消息有key的情况
             // hash the keyBytes to choose a partition
             return Utils.toPositive(Utils.murmur2(keyBytes)) % numPartitions;
         }

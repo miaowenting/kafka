@@ -33,20 +33,38 @@ import java.util.Set;
 
 /**
  * An immutable representation of a subset of the nodes, topics, and partitions in the Kafka cluster.
+ *
+ * 通过Node、TopicPartition、PartitionInfo 3个类的组合，可以完整表示出KafkaProducer需要的集群元数据。
+ * 客户端维护的集群拓扑结构，可以进行多维查询，在元数据更新成功后会被覆盖
  */
 public final class Cluster {
 
     private final boolean isBootstrapConfigured;
-    private final List<Node> nodes;
-    private final Set<String> unauthorizedTopics;
+
+    /**  kafka集群中节点信息的列表  */
+    private final List<Node> nodes; // node 列表
+    private final Set<String> unauthorizedTopics;// 未认证的 topic 列表
     private final Set<String> invalidTopics;
+    /**  内置的 topic 列表 */
     private final Set<String> internalTopics;
+    /**  controller节点 */
     private final Node controller;
+    /**  partition 的详细信息 */
     private final Map<TopicPartition, PartitionInfo> partitionsByTopicPartition;
+    /**  topic 与 partition 的对应关系 */
     private final Map<String, List<PartitionInfo>> partitionsByTopic;
+    /**
+     * 可用（leader 不为 null）的 topic 与 partition 的对应关系
+     *  availablePartitionsByTopic: Topic与ParitionInfo的映射关系，这里的List<PartitionInfo>中存放的分区必须是有
+     *  Leader副本的Partition, 而partitionsByTopic中记录的分区则不一定有 Leader副本，因为某些中间状态，
+     *  例如Leader副本宕机而触发的选举过程中，分区不-定有Leader 副本
+     * */
     private final Map<String, List<PartitionInfo>> availablePartitionsByTopic;
+    /**  node 与 partition 的对应关系 */
     private final Map<Integer, List<PartitionInfo>> partitionsByNode;
+    /**  node 与 id 的对应关系 */
     private final Map<Integer, Node> nodesById;
+    /**   */
     private final ClusterResource clusterResource;
 
     /**
@@ -228,6 +246,7 @@ public final class Cluster {
      * @return A list of partitions
      */
     public List<PartitionInfo> partitionsForTopic(String topic) {
+        // 获取指定topic的分区集合
         return partitionsByTopic.getOrDefault(topic, Collections.emptyList());
     }
 

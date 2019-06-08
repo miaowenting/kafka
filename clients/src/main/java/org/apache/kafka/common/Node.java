@@ -20,6 +20,8 @@ import java.util.Objects;
 
 /**
  * Information about a Kafka node
+ *
+ * Node表示集群中的一-个苟点，Node己彖込个苟点的host、ip、 port等信息。
  */
 public class Node {
 

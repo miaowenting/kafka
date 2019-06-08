@@ -18,6 +18,10 @@ package org.apache.kafka.common;
 
 /**
  * This is used to describe per-partition state in the MetadataResponse.
+ *
+ * PartitionInfo 表示一个分区的详细信息。其中topic字段和partition字段的含义与TopicPartition中的相同，
+ * 除此之外，leader 字段记录了Leader副本所在节点的id, replica 字段记录了全部副本所在的节点信息，
+ * inSyncReplicas 字段记录了ISR集合中所有副本所在的节点信息。
  */
 public class PartitionInfo {
     private final String topic;

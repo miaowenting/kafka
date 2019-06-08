@@ -33,6 +33,10 @@ import org.apache.kafka.common.Configurable;
  * ProducerInterceptor callbacks may be called from multiple threads. Interceptor implementation must ensure thread-safety, if needed.
  * <p>
  * Implement {@link org.apache.kafka.common.ClusterResourceListener} to receive cluster metadata once it's available. Please see the class documentation for ClusterResourceListener for more information.
+ *
+ * ProducerInterceptor对象可以在消息发送之前对其进行拦截或修改,也可以先于用户的Callback,对ACK响应进行预处理。如果读者熟悉Java Web开发，可以将其与Filter 的
+ * 功能做类比。如果读者要使用自定义ProducerInterceptor类，只要实现ProducerInterceptor接口，创建其对象并添加到ProducerInterceptors中即可。
+ *
  */
 public interface ProducerInterceptor<K, V> extends Configurable {
     /**

@@ -56,19 +56,44 @@ import java.util.function.Predicate;
  * If topic expiry is enabled for the metadata, any topic that has not been used within the expiry interval
  * is removed from the metadata refresh set after an update. Consumers disable topic expiry since they explicitly
  * manage topics while producers rely on topic expiry to limit the refresh set.
+ *
+ *  Metadata可由主线程读，Sender线程更新，因此它必须是线程安全的，所有方法都使用了synchronized
  */
 public class Metadata implements Closeable {
     private final Logger log;
+    /**
+     *  两次发出更新Cluster元数据信息的最小时间差,防止操作过于频繁，默认100ms，"退避时间"设计,
+     *  两次发出更新Cluster保存的元数据信息的最小时间差，默认为100ms。这是为了防止更新操作过于频繁而造成网络阻塞和增加服务端压力。
+     *  在Kafka中与重试操作有关的操作中，都有这种“退避( backoff)时间”设计的身影。
+     */
     private final long refreshBackoffMs;
+    /**
+     * 每隔多久更新一次, 默认 60,000ms,每隔多久，更新- -次。默认是300x 1000,也就是5分种。
+     */
     private final long metadataExpireMs;
+    /**
+     * 每更新成功1次，version自增1,主要是用于判断 metadata 是否更新
+     */
     private int updateVersion;  // bumped on every metadata response
     private int requestVersion; // bumped on every new topic addition
+    /**
+     * 最近一次更新时的时间（包含更新失败的情况）
+     */
     private long lastRefreshMs;
+    /**
+     * 最近一次成功更新的时间（如果每次都成功的话，与前面的值相等, 否则，lastSuccessulRefreshMs < lastRefreshMs)
+     */
     private long lastSuccessfulRefreshMs;
     private KafkaException fatalException;
     private KafkaException recoverableException;
     private MetadataCache cache = MetadataCache.empty();
+    /**
+     * 是否需要强制更新Cluster，这是触发Sender线程更新集群元数据的条件之- 。
+     */
     private boolean needUpdate;
+    /**
+     * 当接收到 metadata 更新时, ClusterResourceListeners的列表
+     */
     private final ClusterResourceListeners clusterResourceListeners;
     private boolean isClosed;
     private final Map<TopicPartition, Integer> lastSeenLeaderEpochs;
@@ -137,7 +162,9 @@ public class Metadata implements Closeable {
      * Request an update of the current cluster metadata info, return the current updateVersion before the update
      */
     public synchronized int requestUpdate() {
+        // 设置为true,表示需强制更新Cluster
         this.needUpdate = true;
+        // 返回当前Kafka集群元数据的版本号
         return this.updateVersion;
     }
 
