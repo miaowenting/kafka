@@ -556,6 +556,10 @@ import java.util.regex.Pattern;
  */
 public class KafkaConsumer<K, V> implements Consumer<K, V> {
 
+    /**
+     * PRODUCER CLIENT ID_ SEQUENCE: clientId 的生成器，如果没有明确指定
+     * client的Id,则使用字段生成-一个ID。
+     */
     private static final String CLIENT_ID_METRIC_TAG = "client-id";
     private static final long NO_CURRENT_THREAD = -1L;
     private static final AtomicInteger CONSUMER_CLIENT_ID_SEQUENCE = new AtomicInteger(1);
@@ -566,32 +570,56 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
     final Metrics metrics;
 
     private final Logger log;
+    /** Consumer的唯一标志  */
     private final String clientId;
+    /**   */
     private String groupId;
+    /**   */
     private Optional<String> groupInstanceId;
+    /**  控制着Consumer与服务端GroupCoordinator之间的通信逻辑  */
     private final ConsumerCoordinator coordinator;
+    /**   */
     private final Deserializer<K> keyDeserializer;
+    /**   */
     private final Deserializer<V> valueDeserializer;
+    /** 负责从服务端获取消息  */
     private final Fetcher<K, V> fetcher;
+    /**
+     * interceptors: ConsumerInterceptor 集合，ConsumerInterceptor.onConsumer( 方法可以在消息通过poll
+     * 方法返回给用户之前对其进行拦截或修改; ConsumerInterceptor.onCommit()方法也可以在服务端返回提交offset
+     * 成功的响应时对其进行拦截或修改。
+     */
     private final ConsumerInterceptors<K, V> interceptors;
 
+    /**   */
     private final Time time;
+    /**  负责消费者与Kafka服务端的网络通信 */
     private final ConsumerNetworkClient client;
+    /** 维护了消费者的消费状态，追踪TopicPartition与offsets的关系  */
     private final SubscriptionState subscriptions;
+    /** 记录 了Kafka集群的元信息  */
     private final ConsumerMetadata metadata;
+    /**   */
     private final long retryBackoffMs;
+    /**   */
     private final long requestTimeoutMs;
+    /**   */
     private final int defaultApiTimeoutMs;
+    /**   */
     private volatile boolean closed = false;
+    /**   */
     private List<PartitionAssignor> assignors;
 
     // currentThread holds the threadId of the current thread accessing KafkaConsumer
     // and is used to prevent multi-threaded access
+    /** 记录了当前使用KafkaConsumer的线程Id  */
     private final AtomicLong currentThread = new AtomicLong(NO_CURRENT_THREAD);
     // refcount is used to allow reentrant access by the thread who has acquired currentThread
+    /** 重入次数  */
     private final AtomicInteger refcount = new AtomicInteger(0);
 
     // to keep from repeatedly scanning subscriptions in poll(), cache the result during metadata updates
+    /**   */
     private boolean cachedSubscriptionHashAllFetchPositions;
 
     /**
@@ -626,6 +654,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
     public KafkaConsumer(Map<String, Object> configs,
                          Deserializer<K> keyDeserializer,
                          Deserializer<V> valueDeserializer) {
+        // 首先创建ConsumerConfig实例
         this(new ConsumerConfig(ConsumerConfig.addDeserializerToConfig(configs, keyDeserializer, valueDeserializer)),
             keyDeserializer,
             valueDeserializer);
@@ -942,6 +971,8 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
      * @throws IllegalStateException If {@code subscribe()} is called previously with pattern, or assign is called
      *                               previously (without a subsequent call to {@link #unsubscribe()}), or if not
      *                               configured at-least one partition assignment strategy
+     *
+     *  订阅指定的topic,并且为x消费者自动分配分区
      */
     @Override
     public void subscribe(Collection<String> topics, ConsumerRebalanceListener listener) {
@@ -1089,6 +1120,9 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
      * @throws IllegalArgumentException If partitions is null or contains null or empty topics
      * @throws IllegalStateException If {@code subscribe()} is called previously with topics or pattern
      *                               (without a subsequent call to {@link #unsubscribe()})
+     *
+     * assign( 方法:用户手动订阅指定的Topic,并且指定消费的分区。此方法与
+     * subscribe(方法互斥，在后面会详细介绍是如何实现互斥的。
      */
     @Override
     public void assign(Collection<TopicPartition> partitions) {
@@ -1202,6 +1236,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
     }
 
     private ConsumerRecords<K, V> poll(final Timer timer, final boolean includeMetadataInTimeout) {
+        // 防止多线程操作
         acquireAndEnsureOpen();
         try {
             if (this.subscriptions.hasNoSubscriptionOrUserAssignment()) {
@@ -1230,10 +1265,12 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
                     //
                     // NOTE: since the consumed position has already been updated, we must not allow
                     // wakeups or any other errors to be triggered prior to returning the fetched records.
+                    // 为了提高效率，在对revords集合进行处理之前，先发送一次FetchRequest。这样，线程处理完本次records集合的操作，与FetchRequest及其相应在网络上传输以及在服务端的处理就变成并行的了。
+                    // 这样就减少了等到网络I/O的时间
                     if (fetcher.sendFetches() > 0 || client.hasPendingRequests()) {
                         client.pollNoWakeup();
                     }
-
+                    // 调用ConsumerInterceptors
                     return this.interceptors.onConsume(new ConsumerRecords<>(records));
                 }
             } while (timer.notExpired());
@@ -2281,9 +2318,12 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
      * @throws ConcurrentModificationException if another thread already has the lock
      */
     private void acquire() {
+        // 记录当前线程Id ,通过CAS操作完成
         long threadId = Thread.currentThread().getId();
+        // 检测到多线程并发操作，则报错
         if (threadId != currentThread.get() && !currentThread.compareAndSet(NO_CURRENT_THREAD, threadId))
             throw new ConcurrentModificationException("KafkaConsumer is not safe for multi-threaded access");
+        // 记录重入次数
         refcount.incrementAndGet();
     }
 
@@ -2291,6 +2331,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
      * Release the light lock protecting the consumer from multi-threaded access.
      */
     private void release() {
+        // 更新线程ID
         if (refcount.decrementAndGet() == 0)
             currentThread.set(NO_CURRENT_THREAD);
     }

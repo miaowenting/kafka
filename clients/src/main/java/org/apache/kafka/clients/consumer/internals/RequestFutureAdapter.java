@@ -21,6 +21,8 @@ package org.apache.kafka.clients.consumer.internals;
  *
  * @param <F> Type to adapt from
  * @param <T> Type to adapt to
+ *
+ * 经典适配器模式
  */
 public abstract class RequestFutureAdapter<F, T> {
 

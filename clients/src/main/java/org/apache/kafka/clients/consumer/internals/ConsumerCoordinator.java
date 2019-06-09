@@ -76,11 +76,21 @@ import java.util.stream.Collectors;
  */
 public final class ConsumerCoordinator extends AbstractCoordinator {
     private final Logger log;
+    /**
+     * 在消费者发送的JoinGroupRequest请求中包含了消费者自身支持的PartitionAssignor信息，
+     * GroupCoordinator从所有消费者都支持的分配策略中选择一个，通知Leader使用此分配策略进行分区分配
+     */
     private final List<PartitionAssignor> assignors;
+    /**
+     * 记录了Kafka集群的元数据
+     */
     private final ConsumerMetadata metadata;
     private final ConsumerCoordinatorMetrics sensors;
     private final SubscriptionState subscriptions;
     private final OffsetCommitCallback defaultOffsetCommitCallback;
+    /**
+     * 是否开启了自动提交offset
+     */
     private final boolean autoCommitEnabled;
     private final int autoCommitIntervalMs;
     private final ConsumerInterceptors<?, ?> interceptors;
@@ -92,6 +102,9 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
 
     private boolean isLeader = false;
     private Set<String> joinedSubscription;
+    /**
+     * 用来存储Metadata的快照信息，检测Topic是否发生了分区数量的变化
+     */
     private MetadataSnapshot metadataSnapshot;
     private MetadataSnapshot assignmentSnapshot;
     private Timer nextAutoCommitTimer;
@@ -252,13 +265,16 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
                                   String assignmentStrategy,
                                   ByteBuffer assignmentBuffer) {
         // only the leader is responsible for monitoring for metadata changes (i.e. partition changes)
+        // Leader需要比较快照，而Follower则不用
         if (!isLeader)
             assignmentSnapshot = null;
 
+        // 查找使用的Consumer own Partition的分配策略
         PartitionAssignor assignor = lookupAssignor(assignmentStrategy);
         if (assignor == null)
             throw new IllegalStateException("Coordinator selected invalid assignment protocol: " + assignmentStrategy);
 
+        // 反序列化，更新assignment
         Assignment assignment = ConsumerProtocol.deserializeAssignment(assignmentBuffer);
         if (!subscriptions.assignFromSubscribed(assignment.partitions())) {
             handleAssignmentMismatch(assignment);
@@ -272,6 +288,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
         maybeUpdateJoinedSubscription(assignedPartitions);
 
         // give the assignor a chance to update internal state based on the received assignment
+        // 回调函数
         assignor.onAssignment(assignment, generation);
 
         // reschedule the auto commit starting from now
@@ -401,15 +418,18 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
     protected Map<String, ByteBuffer> performAssignment(String leaderId,
                                                         String assignmentStrategy,
                                                         List<JoinGroupResponseData.JoinGroupResponseMember> allSubscriptions) {
+        // 根据group_protocol字段指定的Partition分配策略，查找响应的PartitionAssignor对象。
         PartitionAssignor assignor = lookupAssignor(assignmentStrategy);
         if (assignor == null)
             throw new IllegalStateException("Coordinator selected invalid assignment protocol: " + assignmentStrategy);
 
         Set<String> allSubscribedTopics = new HashSet<>();
         Map<String, Subscription> subscriptions = new HashMap<>();
+        // 遍历每个消费者的订阅信息
         for (JoinGroupResponseData.JoinGroupResponseMember memberSubScription : allSubscriptions) {
             Subscription subscription = ConsumerProtocol.deserializeSubscription(ByteBuffer.wrap(memberSubScription.metadata()));
             subscriptions.put(memberSubScription.memberId(), subscription);
+            //得到Consumer Group中全部消费者订阅的Topic
             allSubscribedTopics.addAll(subscription.topics());
         }
 
@@ -421,6 +441,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
 
         log.debug("Performing assignment using strategy {} with subscriptions {}", assignor.name(), subscriptions);
 
+        // 进行分区分配
         Map<String, Assignment> assignment = assignor.assign(metadata.fetch(), subscriptions);
 
         // user-customized assignor may have created some topics that are not in the subscription list
@@ -456,6 +477,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
 
         log.debug("Finished assignment for group: {}", assignment);
 
+        // 将分区结果序列化，并保存到groupAssignment中
         Map<String, ByteBuffer> groupAssignment = new HashMap<>();
         for (Map.Entry<String, Assignment> assignmentEntry : assignment.entrySet()) {
             ByteBuffer buffer = ConsumerProtocol.serializeAssignment(assignmentEntry.getValue());
@@ -468,9 +490,11 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
     @Override
     protected void onJoinPrepare(int generation, String memberId) {
         // commit offsets prior to rebalance if auto-commit enabled
+        // 开启了自动提交offset则进行同步提交offset，可能会阻塞线程
         maybeAutoCommitOffsetsSync(time.timer(rebalanceTimeoutMs));
 
         // execute the user's callback before rebalance
+        // 调用注册在SubscriptionState的ConsumerRebalanceListener上的回调方法
         ConsumerRebalanceListener listener = subscriptions.rebalanceListener();
         Set<TopicPartition> revoked = subscriptions.assignedPartitions();
         log.info("Revoking previously assigned partitions {}", revoked);
@@ -511,11 +535,13 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
     public boolean refreshCommittedOffsetsIfNeeded(Timer timer) {
         final Set<TopicPartition> missingFetchPositions = subscriptions.missingFetchPositions();
 
+        // 发送OffsetFetchRequest并处理OffsetFetchResponse响应。返回值是最近提交的offset集合
         final Map<TopicPartition, OffsetAndMetadata> offsets = fetchCommittedOffsets(missingFetchPositions, timer);
         if (offsets == null) return false;
 
         for (final Map.Entry<TopicPartition, OffsetAndMetadata> entry : offsets.entrySet()) {
             final TopicPartition tp = entry.getKey();
+            // 更新TopicPartitionState的committed字段
             final OffsetAndMetadata offsetAndMetadata = entry.getValue();
             final ConsumerMetadata.LeaderAndEpoch leaderAndEpoch = metadata.leaderAndEpoch(tp);
             final SubscriptionState.FetchPosition position = new SubscriptionState.FetchPosition(
@@ -549,6 +575,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
             if (!ensureCoordinatorReady(timer)) return null;
 
             // contact coordinator to fetch committed offsets
+            // 创建并缓存OffsetFetchRequest请求
             final RequestFuture<Map<TopicPartition, OffsetAndMetadata>> future;
             if (pendingCommittedOffsetRequest != null) {
                 future = pendingCommittedOffsetRequest.response;
@@ -557,16 +584,19 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
                 pendingCommittedOffsetRequest = new PendingCommittedOffsetRequest(partitions, generation, future);
 
             }
+            // 阻塞发送Offs请求etFetchRequest
             client.poll(future, timer);
 
             if (future.isDone()) {
                 pendingCommittedOffsetRequest = null;
 
+                // 从服务端得到的offset
                 if (future.succeeded()) {
                     return future.value();
                 } else if (!future.isRetriable()) {
                     throw future.exception();
                 } else {
+                    // 退避一段时间，重试
                     timer.sleep(retryBackoffMs);
                 }
             } else {
@@ -638,11 +668,14 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
         // ensure the commit has a chance to be transmitted (without blocking on its completion).
         // Note that commits are treated as heartbeats by the coordinator, so there is no need to
         // explicitly allow heartbeats through delayed task execution.
+        // 将OffsetCommitRequest无阻塞发送出去
         client.pollNoWakeup();
     }
 
     private void doCommitOffsetsAsync(final Map<TopicPartition, OffsetAndMetadata> offsets, final OffsetCommitCallback callback) {
+        // 创建并缓存OffsetCommitOffset请求
         RequestFuture<Void> future = sendOffsetCommitRequest(offsets);
+        // 选择回调函数
         final OffsetCommitCallback cb = callback == null ? defaultOffsetCommitCallback : callback;
         future.addListener(new RequestFutureListener<Void>() {
             @Override
@@ -684,6 +717,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
         if (offsets.isEmpty())
             return true;
 
+        // 阻塞等到OffsetCommitResponse处理完成，这样才实现了同步提交的功能
         do {
             if (coordinatorUnknown() && !ensureCoordinatorReady(timer)) {
                 return false;
@@ -855,8 +889,10 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
                     TopicPartition tp = new TopicPartition(topic.name(), partition.partitionIndex());
                     OffsetAndMetadata offsetAndMetadata = this.offsets.get(tp);
 
+                    // 获取offset
                     long offset = offsetAndMetadata.offset();
 
+                    // 获取错误码
                     Errors error = Errors.forCode(partition.errorCode());
                     if (error == Errors.NONE) {
                         log.debug("Committed offset {} for partition {}", offset, tp);
@@ -911,6 +947,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
                 log.error("Not authorized to commit to topics {}", unauthorizedTopics);
                 future.raise(new TopicAuthorizationException(unauthorizedTopics));
             } else {
+                // 传播成功提交offset的事件，最终调用上面添加的Callback
                 future.complete(null);
             }
         }
@@ -961,6 +998,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
             }
 
             Map<TopicPartition, OffsetAndMetadata> offsets = new HashMap<>(response.responseData().size());
+            // 处理OffsetFetchResponse中的每个分区
             for (Map.Entry<TopicPartition, OffsetFetchResponse.PartitionData> entry : response.responseData().entrySet()) {
                 TopicPartition tp = entry.getKey();
                 OffsetFetchResponse.PartitionData data = entry.getValue();
@@ -983,6 +1021,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
                 }
             }
 
+            // 传播offsets集合
             future.complete(offsets);
         }
     }

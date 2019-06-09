@@ -98,6 +98,13 @@ public interface ConsumerRebalanceListener {
      * @param partitions The list of partitions that were assigned to the consumer on the last rebalance
      * @throws org.apache.kafka.common.errors.WakeupException If raised from a nested call to {@link KafkaConsumer}
      * @throws org.apache.kafka.common.errors.InterruptException If raised from a nested call to {@link KafkaConsumer}
+     *
+     * onPartitionsRevoked( 方法:调用时机是Consumer停止拉取数据之后、Rebalance
+     *    开始之前，我们可以在此方法中实现手动提交offset,这就避免了Rebalance 导致
+     *    的重复消费的情况。
+     *
+     * onPartitionsAssigned(方法:调用时机是Rebalance完成之后、Consumer 开始拉取
+     *  数据之前，我们可以在此方法中调整或自定义offset 的值。
      */
     void onPartitionsRevoked(Collection<TopicPartition> partitions);
 
@@ -120,6 +127,9 @@ public interface ConsumerRebalanceListener {
      *            assigned to the consumer)
      * @throws org.apache.kafka.common.errors.WakeupException If raised from a nested call to {@link KafkaConsumer}
      * @throws org.apache.kafka.common.errors.InterruptException If raised from a nested call to {@link KafkaConsumer}
+     *
+     * onPartitionsAssigned(方法:调用时机是Rebalance完成之后、Consumer 开始拉取
+     *  数据之前，我们可以在此方法中调整或自定义offset 的值。
      */
     void onPartitionsAssigned(Collection<TopicPartition> partitions);
 }

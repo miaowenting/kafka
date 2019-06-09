@@ -69,6 +69,14 @@ public class SubscriptionState {
 
     private final Logger log;
 
+    /**
+     * 内部枚举类，订阅Topic的模式.按指定的topic;按正则表达式匹配topic;手动指定topic和分区号
+     *
+     * NONE:            SubscriptionState.subscriptionType 的初始值。
+     * AUTO TOPICS:     按照指定的Topic名字进行订阅，自动分配分区。
+     * AUTO_ PATTERN:   按照指定的正则表达式匹配Topic进行订阅，自动分配分区。
+     * USER ASSIGNED:   用户手动指定消费者消费的Topic以及分区编号。
+     */
     private enum SubscriptionType {
         NONE, AUTO_TOPICS, AUTO_PATTERN, USER_ASSIGNED
     }
@@ -76,24 +84,46 @@ public class SubscriptionState {
     /* the type of subscription */
     private SubscriptionType subscriptionType;
 
-    /* the pattern user has requested */
+    /** the pattern user has requested
+     * 正则表达式串 AUTO_PATTERN
+     * subscribedPattem:使用AUTO_ PATTERN 模式时，是按照此字段记录的正则表达
+     * 式对所有Topic进行匹配，对匹配符合的Topic进行订阅。
+     * */
     private Pattern subscribedPattern;
 
-    /* the list of topics the user has requested */
+    /** the list of topics the user has requested
+    *
+     * subscription:
+     *  如果使用AUTO TOPICS或AUTO_ PATTERN模式，则使用
+     *  此集合记录所有订阅的Topic。向subscription集合中添加数据的方法只有
+     *  changeSubscription(方法,而调用changeSubscription()方法有两处
+     *
+     * */
     private Set<String> subscription;
 
     /* The list of topics the group has subscribed to. This may include some topics which are not part
      * of `subscription` for the leader of a group since it is responsible for detecting metadata changes
      * which require a group rebalance. */
+    /**
+     *  Leader使用该集合记录Consumer
+     *  Group中所有消费者订阅的topic。Follower的该集合中只记录其自身订阅的topic
+     */
     private Set<String> groupSubscription;
 
     /* the partitions that are currently assigned, note that the order of partition matters (see FetchBuilder for more details) */
+    /**
+     * 无论使用什么订阅模式，都使用此集合记录每个TopicPartition的消费状态
+     */
     private final PartitionStates<TopicPartitionState> assignment;
 
-    /* Default offset reset strategy */
+    /** Default offset reset strategy
+     * 默认OffsetResetStrategy策略
+     * */
     private final OffsetResetStrategy defaultResetStrategy;
 
-    /* User-provided listener to be invoked when assignment changes */
+    /** User-provided listener to be invoked when assignment changes
+     * 监听分区分配操作
+      * */
     private ConsumerRebalanceListener rebalanceListener;
 
     private int assignmentId = 0;
@@ -125,12 +155,16 @@ public class SubscriptionState {
      * @param type The given subscription type
      */
     private void setSubscriptionType(SubscriptionType type) {
+        // 如果是NONE，可以指定其他模式
         if (this.subscriptionType == SubscriptionType.NONE)
             this.subscriptionType = type;
-        else if (this.subscriptionType != type)
+        else if (this.subscriptionType != type) {
+            // 如果已经指定了其他模式则会报错
             throw new IllegalStateException(SUBSCRIPTION_EXCEPTION_MESSAGE);
+        }
     }
 
+    /** AUTO_TOPICS 订阅类型 */
     public synchronized boolean subscribe(Set<String> topics, ConsumerRebalanceListener listener) {
         registerRebalanceListener(listener);
         setSubscriptionType(SubscriptionType.AUTO_TOPICS);
@@ -143,6 +177,7 @@ public class SubscriptionState {
         this.subscribedPattern = pattern;
     }
 
+    /** AUTO_PATTERN 订阅类型 */
     public synchronized boolean subscribeFromPattern(Set<String> topics) {
         if (subscriptionType != SubscriptionType.AUTO_PATTERN)
             throw new IllegalArgumentException("Attempt to subscribe from pattern while subscription type set to " +
@@ -152,6 +187,7 @@ public class SubscriptionState {
     }
 
     private boolean changeSubscription(Set<String> topicsToSubscribe) {
+        // 向subscription集合中添加数据
         if (subscription.equals(topicsToSubscribe))
             return false;
 
@@ -167,6 +203,7 @@ public class SubscriptionState {
      * @param topics The topics to add to the group subscription
      */
     synchronized boolean groupSubscribe(Collection<String> topics) {
+        // Leader收到JoinGroupResponse时调用，JoinGroupResponse包含全部消费者订阅的topic
         if (!partitionsAutoAssigned())
             throw new IllegalStateException(SUBSCRIPTION_EXCEPTION_MESSAGE);
         groupSubscription = new HashSet<>(groupSubscription);
@@ -366,6 +403,7 @@ public class SubscriptionState {
     }
 
     synchronized List<TopicPartition> fetchablePartitions(Predicate<TopicPartition> isAvailable) {
+        // assignment集合中有对应记录的分区
         return assignment.stream()
                 .filter(tpState -> isAvailable.test(tpState.topicPartition()) && tpState.value().isFetchable())
                 .map(PartitionStates.PartitionState::topicPartition)
@@ -633,15 +671,28 @@ public class SubscriptionState {
         return map;
     }
 
+    /**
+     * 表示topic的消费状态
+     */
     private static class TopicPartitionState {
 
         private FetchState fetchState;
+        /**
+         * 记录了消费者下次要从服务端获取的消息的offset。当没有待提交的offset值时，则将position作为待提交offset
+         */
         private FetchPosition position; // last consumed position
 
         private Long highWatermark; // the high watermark from last fetch
         private Long logStartOffset; // the log start offset
         private Long lastStableOffset;
+        /**
+         * paused:记录了当前TopicPartition是否处于暂停状态，与Consumer接口的pause()方法相关。
+         */
         private boolean paused;  // whether this partition has been paused by the user
+        /**
+         * resetStrategy: OffsetResetStrategy 枚举类型，重置position的策略。同时，
+         * 此字段是否为空，也表示了是否需要重置position的值。
+         */
         private OffsetResetStrategy resetStrategy;  // the strategy to use if the offset needs resetting
         private Long nextRetryTimeMs;
         private Integer preferredReadReplica;

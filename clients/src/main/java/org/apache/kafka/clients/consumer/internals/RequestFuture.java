@@ -46,12 +46,20 @@ public class RequestFuture<T> implements ConsumerNetworkClient.PollCondition {
 
     private static final Object INCOMPLETE_SENTINEL = new Object();
     private final AtomicReference<Object> result = new AtomicReference<>(INCOMPLETE_SENTINEL);
+    /**
+     * 监听请求完成的情况
+     */
     private final ConcurrentLinkedQueue<RequestFutureListener<T>> listeners = new ConcurrentLinkedQueue<>();
+    /**
+     * 实现Future功能
+     */
     private final CountDownLatch completedLatch = new CountDownLatch(1);
 
     /**
      * Check whether the response is ready to be handled
      * @return true if the response is ready, false otherwise
+     *
+     * isDone: 表示当前请求是否已经完成，不管正常完成还是出现异常，此字段都会被设置为true。
      */
     public boolean isDone() {
         return result.get() != INCOMPLETE_SENTINEL;
@@ -65,6 +73,8 @@ public class RequestFuture<T> implements ConsumerNetworkClient.PollCondition {
      * Get the value corresponding to this request (only available if the request succeeded)
      * @return the value set in {@link #complete(Object)}
      * @throws IllegalStateException if the future is not complete or failed
+     *
+     *  value: 记录请求正常完成时收到的响应，与exception字段互斥。此字段非空表示正常完成，反之表示出现异常。
      */
     @SuppressWarnings("unchecked")
     public T value() {
@@ -103,6 +113,10 @@ public class RequestFuture<T> implements ConsumerNetworkClient.PollCondition {
      * Get the exception from a failed result (only available if the request failed)
      * @return the exception set in {@link #raise(RuntimeException)}
      * @throws IllegalStateException if the future is not complete or completed successfully
+     *
+     * 记录导致请求异常完成的异常类
+     *
+     * exception: 记录导致请求异常完成的异常类，与value字段互斥。此字段非空则表示出现异常，反之则表示正常完成。
      */
     public RuntimeException exception() {
         if (!failed())
@@ -195,9 +209,13 @@ public class RequestFuture<T> implements ConsumerNetworkClient.PollCondition {
      * @param adapter The adapter which does the conversion
      * @param <S> The type of the future adapted to
      * @return The new future
+     *
+     * 适配器模式
      */
     public <S> RequestFuture<S> compose(final RequestFutureAdapter<T, S> adapter) {
+        // 适配之后的结果
         final RequestFuture<S> adapted = new RequestFuture<>();
+        // 在当前RequestFuture上添加监听器
         addListener(new RequestFutureListener<T>() {
             @Override
             public void onSuccess(T value) {
@@ -212,15 +230,22 @@ public class RequestFuture<T> implements ConsumerNetworkClient.PollCondition {
         return adapted;
     }
 
+    /**
+     * 责任链模式
+     * @param future
+     */
     public void chain(final RequestFuture<T> future) {
+        // 添加监听器
         addListener(new RequestFutureListener<T>() {
             @Override
             public void onSuccess(T value) {
+                // 通过监听器将value传递给下一个RequestFuture对象
                 future.complete(value);
             }
 
             @Override
             public void onFailure(RuntimeException e) {
+                // 通过监听器将异常信息传递给下一个RequestFuture对象
                 future.raise(e);
             }
         });
