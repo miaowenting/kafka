@@ -62,6 +62,8 @@ import java.util.function.Supplier;
  * <li>a {@link ChannelMuteState} to document if the channel has been muted due
  * to memory pressure or other reasons</li>
  * </ul>
+ *
+ * 在SocketChannel上的一层封装，提供统一的接口，是对策略模式很好的应用
  */
 public class KafkaChannel implements AutoCloseable {
     private static final long MIN_REAUTH_INTERVAL_ONE_SECOND_NANOS = 1000 * 1000 * 1000;
@@ -113,6 +115,9 @@ public class KafkaChannel implements AutoCloseable {
     }
 
     private final String id;
+    /**
+     * 传输层 plaintext,sasl,根据网络协议的不同，提供不同的子类
+     */
     private final TransportLayer transportLayer;
     private final Supplier<Authenticator> authenticatorCreator;
     private Authenticator authenticator;
@@ -121,7 +126,13 @@ public class KafkaChannel implements AutoCloseable {
     private long networkThreadTimeNanos;
     private final int maxReceiveSize;
     private final MemoryPool memoryPool;
+    /**
+     * 读时用的缓存
+     */
     private NetworkReceive receive;
+    /**
+     * 1个channel一次只能存放1个数据包
+     */
     private Send send;
     // Track connection and mute state of channels to enable outstanding requests on channels to be
     // processed after the channel is disconnected.
@@ -369,9 +380,12 @@ public class KafkaChannel implements AutoCloseable {
     }
 
     public void setSend(Send send) {
+        // 当前的没有发出去之前，不能暂存下一个,每个KafkaChannel一次poll过程中只能发送一个Send请求，
+        // 有时一次一个Send也发不完，需要多次poll
         if (this.send != null)
             throw new IllegalStateException("Attempt to begin a send operation with prior send operation still in progress, connection id is " + id);
         this.send = send;
+        // 注册写的感兴趣事件，开始关注此连接的OP_WRITE事件,将写事件添加到selector的监听队列
         this.transportLayer.addInterestOps(SelectionKey.OP_WRITE);
     }
 
@@ -382,6 +396,15 @@ public class KafkaChannel implements AutoCloseable {
             receive = new NetworkReceive(maxReceiveSize, id, memoryPool);
         }
 
+        /**
+         * 初始化NetworkReceive (略)
+         * receive() 方法从transportLayer中读取数据到NetworkReceive对象中。
+         * 并没有读完一个完整的NetworkReceive,则下次触发OP_ READ 事件时继续填充此
+         * NetworkReceive 对象;如果读取了-一个完整的NetworkReceive对象，则将
+         * receive置空，下次触发读操作时，创建新NetworkReceive对象
+         *
+         *
+         */
         receive(receive);
         if (receive.complete()) {
             receive.payload().rewind();
@@ -420,13 +443,29 @@ public class KafkaChannel implements AutoCloseable {
         return current;
     }
 
+    /**
+     * 初始化NetworkReceive (略)
+     * receive() 方法从transportLayer中读取数据到NetworkReceive对象中。
+     * 并没有读完一个完整的NetworkReceive,则下次触发OP_ READ 事件时继续填充此
+     * NetworkReceive 对象;如果读取了-一个完整的NetworkReceive对象，则将
+     * receive置空，下次触发读操作时，创建新NetworkReceive对象
+     *
+     * @param receive
+     * @return
+     * @throws IOException
+     */
     private long receive(NetworkReceive receive) throws IOException {
         return receive.readFrom(transportLayer);
     }
 
     private boolean send(Send send) throws IOException {
         midWrite = true;
+        /**
+         * 如果send在一次write调用时没有发送完，SelectionKey的OP WRITE事件没有取消，
+         * 还会继续监听此Channel的OP WRITE 事件，直到整个send请求发送完毕才取消
+         */
         send.writeTo(transportLayer);
+        // 判断发送是否完成是通过ByteBuffer中是否还有剩余字节来判断的
         if (send.completed()) {
             midWrite = false;
             transportLayer.removeInterestOps(SelectionKey.OP_WRITE);

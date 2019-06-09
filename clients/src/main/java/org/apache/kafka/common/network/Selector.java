@@ -102,21 +102,60 @@ public class Selector implements Selectable, AutoCloseable {
     }
 
     private final Logger log;
+    /**
+     * 用来监听网络I/O事件
+     */
     private final java.nio.channels.Selector nioSelector;
+    /**
+     * <nodeidString,KafkaChannel>有正在连接以及连接成功的channel，注意它的类型是KafkaChannel
+     * channels: HashMap<String, KafkaChannel>类型，维护了Nodeld与KafkaChannel
+     * 之间的映射关系，表示生产者客户端与各个Node之间的网络连接。
+     * KafkaChannel是在SocketChannel上的又一层封装，如图2-24所示，其中Send
+     * 和NetworkReceive分别表示读和写时用的缓存，底层通过ByteBuffer实现，
+     * TransportL ayer封装SocketChannel及SelectionKey, TransportLayer 根据网络协议
+     * 的不同，提供不同的子类，而对KafkaChannel提供统一的接口，这是策略模式很
+     * 好的应用，请读者积累。
+     */
     private final Map<String, KafkaChannel> channels;
     private final Set<KafkaChannel> explicitlyMutedChannels;
     private boolean outOfMemory;
+    /**
+     * 已发送完的请求
+     */
     private final List<Send> completedSends;
+    /**
+     * 已接收完成的响应。注意，这个集合并没有包括所有已接收完成的响应，stagedReceives集合也包括了一些接
+     */
     private final List<NetworkReceive> completedReceives;
+    /**
+     * 已接收完成，但还没有暴露给用户的响应
+     * 暂存一次OP_READ事件处理过程中读取到的全部请求。当一次OP_READ事件处理完成之后，
+     * 会将stagedReceives集合中的请求保存到completedReceives集合中。
+     */
     private final Map<KafkaChannel, Deque<NetworkReceive>> stagedReceives;
+    /**
+     *  在调用SocketChannel#connect方法时立即完成的SelectionKey
+     */
     private final Set<SelectionKey> immediatelyConnectedKeys;
     private final Map<String, KafkaChannel> closingChannels;
     private Set<SelectionKey> keysWithBufferedRead;
+    /**
+     * 记录一次poll过程中发现的已断开连接
+     */
     private final Map<String, ChannelState> disconnected;
+    /**
+     * 新建立的连接
+     */
     private final List<String> connected;
+    /**
+     * 记录向哪些Node发送的请求失败了
+     */
     private final List<String> failedSends;
     private final Time time;
     private final SelectorMetrics sensors;
+    /**
+     * 用于创建KafkaChannel的Builer，根据不同的配置创建不同的TransportLayer的子类
+     */
     private final ChannelBuilder channelBuilder;
     private final int maxReceiveSize;
     private final boolean recordTimePerConnection;
@@ -150,13 +189,14 @@ public class Selector implements Selectable, AutoCloseable {
             Metrics metrics,
             Time time,
             String metricGrpPrefix,
-            Map<String, String> metricTags,
+            Map<String, String> metricTags,  // 创建MetricName时使用的tags集合，会成为MBean名称的一部分
             boolean metricsPerConnection,
             boolean recordTimePerConnection,
             ChannelBuilder channelBuilder,
             MemoryPool memoryPool,
             LogContext logContext) {
         try {
+            // Selector的创建
             this.nioSelector = java.nio.channels.Selector.open();
         } catch (IOException e) {
             throw new KafkaException(e);
@@ -175,6 +215,7 @@ public class Selector implements Selectable, AutoCloseable {
         this.connected = new ArrayList<>();
         this.disconnected = new HashMap<>();
         this.failedSends = new ArrayList<>();
+        // 封装KSelector使用到的全部Sensor对象
         this.sensors = new SelectorMetrics(metrics, metricGrpPrefix, metricTags, metricsPerConnection);
         this.channelBuilder = channelBuilder;
         this.recordTimePerConnection = recordTimePerConnection;
@@ -247,10 +288,15 @@ public class Selector implements Selectable, AutoCloseable {
      * @param receiveBufferSize The receive buffer for the new connection
      * @throws IllegalStateException if there is already a connection for that id
      * @throws IOException if DNS resolution fails on the hostname or if the broker is down
+     *
+     * 主要创建kafkaChannel并且添加到channels集合中
+     *
+     *
      */
     @Override
     public void connect(String id, InetSocketAddress address, int sendBufferSize, int receiveBufferSize) throws IOException {
         ensureNotRegistered(id);
+        // 创建SocketChannel
         SocketChannel socketChannel = SocketChannel.open();
         SelectionKey key = null;
         try {
@@ -277,6 +323,7 @@ public class Selector implements Selectable, AutoCloseable {
     // in order to simulate "immediately connected" sockets.
     protected boolean doConnect(SocketChannel channel, InetSocketAddress address) throws IOException {
         try {
+            // 因为是非阻塞模式，所以connect方法是发起一个连接，在连接之前就可能返回，通过finishConnect()确定连接是否真的建立了
             return channel.connect(address);
         } catch (UnresolvedAddressException e) {
             throw new IOException("Can't resolve address: " + address, e);
@@ -285,8 +332,10 @@ public class Selector implements Selectable, AutoCloseable {
 
     private void configureSocketChannel(SocketChannel socketChannel, int sendBufferSize, int receiveBufferSize)
             throws IOException {
+        // 将SocketChannel设置为非阻塞的，一定要设置，否则异步I/O就不能工作
         socketChannel.configureBlocking(false);
         Socket socket = socketChannel.socket();
+        // 设置为长连接
         socket.setKeepAlive(true);
         if (sendBufferSize != Selectable.USE_DEFAULT_BUFFER_SIZE)
             socket.setSendBufferSize(sendBufferSize);
@@ -322,9 +371,20 @@ public class Selector implements Selectable, AutoCloseable {
             throw new IllegalStateException("There is already a connection for id " + id + " that is still being closed");
     }
 
+    /**
+     * 为了将Channel和Selector配合使用，必须将channel注册到selector上与Selector一起使用时，
+     * Channel必须处于非阻塞模式下。这意味着不能将FileChannel与Selector一起使用，因为FileChannel不能切换到非阻塞模式。而套接字通道都可以
+     * @param id
+     * @param socketChannel
+     * @param interestedOps
+     * @return
+     * @throws IOException
+     */
     protected SelectionKey registerChannel(String id, SocketChannel socketChannel, int interestedOps) throws IOException {
+        // 将SocketChannel的读事件添加到Selector的监听队列，选择键封装了某一个通道与某一个选择器的注册关系，添加OP_READ事件
         SelectionKey key = socketChannel.register(nioSelector, interestedOps);
         KafkaChannel channel = buildAndAttachKafkaChannel(socketChannel, id, key);
+        // 将NodeId和KafkaChannel绑定，放到channels中管理
         this.channels.put(id, channel);
         if (idleExpiryManager != null)
             idleExpiryManager.update(channel.id(), time.nanoseconds());
@@ -333,7 +393,9 @@ public class Selector implements Selectable, AutoCloseable {
 
     private KafkaChannel buildAndAttachKafkaChannel(SocketChannel socketChannel, String id, SelectionKey key) throws IOException {
         try {
+            // 调用ChannelBuilder.buildChannel()方法创建KafkaChannel对象
             KafkaChannel channel = channelBuilder.buildChannel(id, key, maxReceiveSize, memoryPool);
+            // 将KafkaChannel绑定为SelectionKey的附加对象
             key.attach(channel);
             return channel;
         } catch (Exception e) {
@@ -383,15 +445,23 @@ public class Selector implements Selectable, AutoCloseable {
     /**
      * Queue the given request for sending in the subsequent {@link #poll(long)} calls
      * @param send The request to send
+     *
+     * KSelector.send()方法是将之前创建的RequestSend 对象缓存到KafkaChannel的send
+     * 字段中，并开始关注此连接的OP_WRITE事件，并没有发生网络I/O。在下次调用
+     * KSelector.poll0时，才会将RequestSend对象发送出去。如果此KafkaChannel的send字段
+     * 上还保存着一个未完全发送成功的RequestSend请求，为防止覆盖数据，则会抛出异常。
+     * 也就是说，每个KafkaChannel一次poll 过程中只能发送一个Send请求。
      */
     public void send(Send send) {
         String connectionId = send.destination();
+        // 找到数据包相对应的Connection
         KafkaChannel channel = openOrClosingChannelOrFail(connectionId);
         if (closingChannels.containsKey(connectionId)) {
             // ensure notification via `disconnected`, leave channel in the state in which closing was triggered
             this.failedSends.add(connectionId);
         } else {
             try {
+                // 并没有真正发送数据，把数据暂存在KafkaChannel里
                 channel.setSend(send);
             } catch (Exception e) {
                 // update the state for consistency, the channel will be discarded after `close`
@@ -437,6 +507,14 @@ public class Selector implements Selectable, AutoCloseable {
      * @throws IllegalArgumentException If `timeout` is negative
      * @throws IllegalStateException If a send is given for which we have no existing connection or for which there is
      *         already an in-progress send
+     *
+     * KSelector.poll方法真正执行网络IO的地方，它会调用nioSelector.select()方法等待
+     * I/O事件发生。当Channel可写时,发送KafkaChannel.send 字段(切记，- -次最多只发送
+     * 一个RequestSend,有时候一个 RequestSend也发送不完，需要多次poll才能发送完成) ;
+     * Channel可读时，读取数据到KafkaChannel.receive,读取- 个完整的NetworkReceive后，:
+     * 会将其缓存到stagedReceives中，当一次pollSelectionKeysO完成后会将stagedReceives
+     * 中的数据转移到completedReceives。最后调用maybeCloseOldestConnection)方法，根据
+     * IruConnections记录和connetionsMaxIdleNanos最大空闲时间，关闭长期空闲的连接。
      */
     @Override
     public void poll(long timeout) throws IOException {
@@ -444,6 +522,7 @@ public class Selector implements Selectable, AutoCloseable {
             throw new IllegalArgumentException("timeout should be >= 0");
 
         boolean madeReadProgressLastCall = madeReadProgressLastPoll;
+        // Selector每次poll之前会清空
         clear();
 
         boolean dataInBuffers = !keysWithBufferedRead.isEmpty();
@@ -463,9 +542,13 @@ public class Selector implements Selectable, AutoCloseable {
         }
 
         /* check ready keys */
+        // 记录select()方法的起始时间
         long startSelect = time.nanoseconds();
+        // select(),返回值表明有一个或更多个通道就绪,等待I/O事件发生
         int numReadyKeys = select(timeout);
+        // 记录select()方法的结束时间
         long endSelect = time.nanoseconds();
+        // 调用selectTime.record()方法记录select()方法的阻塞时间
         this.sensors.selectTime.record(endSelect - startSelect, time.milliseconds());
 
         if (numReadyKeys > 0 || !immediatelyConnectedKeys.isEmpty() || dataInBuffers) {
@@ -476,6 +559,7 @@ public class Selector implements Selectable, AutoCloseable {
                 keysWithBufferedRead.removeAll(readyKeys); //so no channel gets polled twice
                 Set<SelectionKey> toPoll = keysWithBufferedRead;
                 keysWithBufferedRead = new HashSet<>(); //poll() calls will repopulate if needed
+                // 访问“已选择键集（selected key set）”中的就绪通道
                 pollSelectionKeys(toPoll, false, endSelect);
             }
 
@@ -498,10 +582,12 @@ public class Selector implements Selectable, AutoCloseable {
 
         // we use the time at the end of select to ensure that we don't close any connections that
         // have just been processed in pollSelectionKeys
+        // 关闭长期空闲的连接
         maybeCloseOldestConnection(endSelect);
 
         // Add to completedReceives after closing expired connections to avoid removing
         // channels with completed receives until all staged receives are completed.
+        // 将stagedReceives复制到completeReceives集合中
         addToCompletedReceives();
     }
 
@@ -510,12 +596,17 @@ public class Selector implements Selectable, AutoCloseable {
      * @param selectionKeys set of keys to handle
      * @param isImmediatelyConnected true if running over a set of keys for just-connected sockets
      * @param currentTimeNanos time at which set of keys was determined
+     *
+     *
+     * KSelectorpollSelectionKeys)方法是处理IO操作的核心方法，其中会分别处理
+     *  OP_CONNECT、OP READ、OP WRITE事件，并且会检测连接状态。
      */
     // package-private for testing
     void pollSelectionKeys(Set<SelectionKey> selectionKeys,
                            boolean isImmediatelyConnected,
                            long currentTimeNanos) {
         for (SelectionKey key : determineHandlingOrder(selectionKeys)) {
+            // KafkaChannel是SelectionKey的附加对象， 根据selectionKey找到KafkaChannel
             KafkaChannel channel = channel(key);
             long channelStartTimeNanos = recordTimePerConnection ? time.nanoseconds() : 0;
             boolean sendFailed = false;
@@ -528,9 +619,12 @@ public class Selector implements Selectable, AutoCloseable {
             try {
                 /* complete any connections that have finished their handshake (either normally or immediately) */
                 if (isImmediatelyConnected || key.isConnectable()) {
+                    // 检测是否已经连接成功
                     if (channel.finishConnect()) {
                         this.connected.add(channel.id());
+                        // 调用connectionCreated.record()方法，记录连接创建数
                         this.sensors.connectionCreated.record();
+                        // 获取SelectionKey上绑定的SocketChannel
                         SocketChannel socketChannel = (SocketChannel) key.channel();
                         log.debug("Created socket with SO_RCVBUF = {}, SO_SNDBUF = {}, SO_TIMEOUT = {} to node {}",
                                 socketChannel.socket().getReceiveBufferSize(),
@@ -538,12 +632,16 @@ public class Selector implements Selectable, AutoCloseable {
                                 socketChannel.socket().getSoTimeout(),
                                 channel.id());
                     } else {
+                        // 连接未完成，跳过对此Channel的后续处理
                         continue;
                     }
                 }
 
+                // 轮询时间的类型，connect、read、write
+
                 /* if channel is not ready finish prepare */
                 if (channel.isConnected() && !channel.ready()) {
+                    // 如果channel不是ready状态，进行初始化，包括了权限认证
                     channel.prepare();
                     if (channel.ready()) {
                         long readyTimeMs = time.milliseconds();
@@ -586,13 +684,19 @@ public class Selector implements Selectable, AutoCloseable {
                     () -> channelStartTimeNanos != 0 ? channelStartTimeNanos : currentTimeNanos)) {
                     Send send;
                     try {
+                        // 实际的IO写操作，还是交给KafkaChannel
+                        // 向Channel写入请求
                         send = channel.write();
                     } catch (Exception e) {
                         sendFailed = true;
                         throw e;
                     }
+                    // send不为空，表示完全发送出去，返回发出去的这个Send对象。如果没完全发出去，返回null
                     if (send != null) {
+                        // 成功发送一个完整的请求
+                        // 添加到completedSends集合中等待后续处理
                         this.completedSends.add(send);
+                        // 调用bytesSent的record()方法进行记录
                         this.sensors.recordBytesSent(channel.id(), send.size());
                     }
                 }
@@ -875,6 +979,7 @@ public class Selector implements Selectable, AutoCloseable {
         try {
             immediatelyConnectedKeys.remove(key);
             keysWithBufferedRead.remove(key);
+            // 关闭连接
             channel.close();
         } catch (IOException e) {
             log.error("Exception closing connection to node {}:", channel.id(), e);
@@ -882,6 +987,7 @@ public class Selector implements Selectable, AutoCloseable {
             key.cancel();
             key.attach(null);
         }
+        // 记录连接关闭数
         this.sensors.connectionClosed.record();
         this.stagedReceives.remove(channel);
         this.explicitlyMutedChannels.remove(channel);
@@ -1011,6 +1117,7 @@ public class Selector implements Selectable, AutoCloseable {
     private void addToCompletedReceives(KafkaChannel channel, Deque<NetworkReceive> stagedDeque) {
         NetworkReceive networkReceive = stagedDeque.poll();
         this.completedReceives.add(networkReceive);
+        // 调用bytesReceived的record()方法进行记录
         this.sensors.recordBytesReceived(channel.id(), networkReceive.size());
     }
 
@@ -1027,6 +1134,7 @@ public class Selector implements Selectable, AutoCloseable {
 
     private class SelectorMetrics implements AutoCloseable {
         private final Metrics metrics;
+        // 如“controller-channel”
         private final String metricGrpPrefix;
         private final Map<String, String> metricTags;
         private final boolean metricsPerConnection;
@@ -1045,10 +1153,24 @@ public class Selector implements Selectable, AutoCloseable {
         public final Sensor selectTime;
         public final Sensor ioTime;
 
-        /* Names of metrics that are not registered through sensors */
+        /**
+         * Names of metrics that are not registered through sensors
+        * // 保存了直接向Metrics注册的Measurable对象，这些Mesurable对象没有注册到Sensor中
+        * */
         private final List<MetricName> topLevelMetricNames = new ArrayList<>();
+        /**
+         * 保存了上述全部Sensor对象
+         */
         private final List<Sensor> sensors = new ArrayList<>();
 
+        /**
+         * SelectorMetrics是KSelector的私有内部类，其中封装了多个Sensor对象。
+         *
+         * @param metrics
+         * @param metricGrpPrefix
+         * @param metricTags
+         * @param metricsPerConnection
+         */
         public SelectorMetrics(Metrics metrics, String metricGrpPrefix, Map<String, String> metricTags, boolean metricsPerConnection) {
             this.metrics = metrics;
             this.metricGrpPrefix = metricGrpPrefix;
@@ -1063,10 +1185,12 @@ public class Selector implements Selectable, AutoCloseable {
                 tagsSuffix.append(tag.getValue());
             }
 
+            // 监控连接关闭，使用Rate记录每秒连接关闭数
             this.connectionClosed = sensor("connections-closed:" + tagsSuffix);
             this.connectionClosed.add(createMeter(metrics, metricGrpName, metricTags,
                     "connection-close", "connections closed"));
 
+            // 监控连接创建，使用Rate记录每秒连接创建数
             this.connectionCreated = sensor("connections-created:" + tagsSuffix);
             this.connectionCreated.add(createMeter(metrics, metricGrpName, metricTags,
                     "connection-creation", "new connections established"));
@@ -1104,34 +1228,58 @@ public class Selector implements Selectable, AutoCloseable {
                     metricTags);
             this.reauthenticationLatency.add(reauthenticationLatencyAvgMetricName, new Avg());
 
+            // 监控网络操作数，使用Rate记录每秒钟所有连接上执行的读写操作总数，bytesSent和bytesReceived两个子Sensor更新
             this.bytesTransferred = sensor("bytes-sent-received:" + tagsSuffix);
             bytesTransferred.add(createMeter(metrics, metricGrpName, metricTags, new Count(),
                     "network-io", "network operations (reads or writes) on all connections"));
 
+            /** 监控发送请求的相关指标，此Sensor是bytesTransferred的子Sensor */
             this.bytesSent = sensor("bytes-sent:" + tagsSuffix, bytesTransferred);
             this.bytesSent.add(createMeter(metrics, metricGrpName, metricTags,
                     "outgoing-byte", "outgoing bytes sent to all servers"));
             this.bytesSent.add(createMeter(metrics, metricGrpName, metricTags, new Count(),
                     "request", "requests sent"));
+            /**
+             * 使用Avg记录发送请求的平均大小
+             */
             MetricName metricName = metrics.metricName("request-size-avg", metricGrpName, "The average size of requests sent.", metricTags);
             this.bytesSent.add(metricName, new Avg());
+            /**
+             * 使用Max记录发送请求的最大长度
+             */
             metricName = metrics.metricName("request-size-max", metricGrpName, "The maximum size of any request sent.", metricTags);
             this.bytesSent.add(metricName, new Max());
 
+            /** 监控接收请求的相关指标，此Sensor是byteTransferred的子Sensor */
             this.bytesReceived = sensor("bytes-received:" + tagsSuffix, bytesTransferred);
             this.bytesReceived.add(createMeter(metrics, metricGrpName, metricTags,
                     "incoming-byte", "bytes read off all sockets"));
             this.bytesReceived.add(createMeter(metrics, metricGrpName, metricTags,
                     new Count(), "response", "responses received"));
 
+            /** 监控select()方法的相关指标 */
             this.selectTime = sensor("select-time:" + tagsSuffix);
+            /**
+             * 使用Rate记录每秒钟调用select()方法的次数 // 会转成KafkaMetric存在Sensor中
+             */
             this.selectTime.add(createMeter(metrics, metricGrpName, metricTags,
                     new Count(), "select", "times the I/O layer checked for new I/O to perform"));
             metricName = metrics.metricName("io-wait-time-ns-avg", metricGrpName, "The average length of time the I/O thread spent waiting for a socket ready for reads or writes in nanoseconds.", metricTags);
+            /**
+             *  使用Avg记录调用select()方法阻塞的平均值
+             */
             this.selectTime.add(metricName, new Avg());
+            /**
+             * 使用Rate记录调用select()方法阻塞时间占总时间的比例
+             */
             this.selectTime.add(createIOThreadRatioMeter(metrics, metricGrpName, metricTags, "io-wait", "waiting"));
 
+
+            /** 监控I/O耗时的相关指标 */
             this.ioTime = sensor("io-time:" + tagsSuffix);
+            /**
+             * 使用Avg记录I/O操作的平均耗时
+             */
             metricName = metrics.metricName("io-time-ns-avg", metricGrpName, "The average length of time for I/O per select call in nanoseconds.", metricTags);
             this.ioTime.add(metricName, new Avg());
             this.ioTime.add(createIOThreadRatioMeter(metrics, metricGrpName, metricTags, "io", "doing I/O"));

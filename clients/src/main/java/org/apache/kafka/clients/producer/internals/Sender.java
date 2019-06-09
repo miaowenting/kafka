@@ -336,11 +336,14 @@ public class Sender implements Runnable {
     }
 
     private long sendProducerData(long now) {
+        // 获取集群元数据
         Cluster cluster = metadata.fetch();
         // get the list of partitions with data ready to send
+        // 根据RecordAccumulator的缓存情况，选出可以向哪些Node发送消息，返回ReadyCheckResult对象
         RecordAccumulator.ReadyCheckResult result = this.accumulator.ready(cluster, now);
 
         // if there are any partitions whose leaders are not known yet, force metadata update
+        // 发现有的topic分区没有leader，标记需要更新Kafka的集群信息
         if (!result.unknownLeaderTopics.isEmpty()) {
             // The set of topics with unknown leader contains topics with leader election pending as well as
             // topics which may have expired. Add the topic again to metadata to ensure it is included
@@ -354,17 +357,20 @@ public class Sender implements Runnable {
         }
 
         // remove any nodes we aren't ready to send to
+        // 根据ReadyCheckResult里的readyNodes集合，循环检查网络I/O是否符合发送条件
         Iterator<Node> iter = result.readyNodes.iterator();
         long notReadyTimeout = Long.MAX_VALUE;
         while (iter.hasNext()) {
             Node node = iter.next();
             if (!this.client.ready(node, now)) {
+                // 不符合条件的Node将会从readyNodes集合中删除
                 iter.remove();
                 notReadyTimeout = Math.min(notReadyTimeout, this.client.pollDelayMs(node, now));
             }
         }
 
         // create produce requests
+        // requests,把发往同一个broker的消息整合在一个request中，调用drain()方法，获取待发送的消息集合
         Map<Integer, List<ProducerBatch>> batches = this.accumulator.drain(cluster, result.readyNodes, this.maxRequestSize, now);
         addToInflightBatches(batches);
         if (guaranteeMessageOrder) {
@@ -377,6 +383,7 @@ public class Sender implements Runnable {
 
         accumulator.resetNextBatchExpiryTime();
         List<ProducerBatch> expiredInflightBatches = getExpiredInflightBatches(now);
+        // 处理超时的Batches,调用ProducerBatch的done方法，触发自定义的Callback
         List<ProducerBatch> expiredBatches = this.accumulator.expiredBatches(now);
         expiredBatches.addAll(expiredInflightBatches);
 
@@ -562,11 +569,30 @@ public class Sender implements Runnable {
 
     /**
      * Handle a produce response
+     *
+     * 经过一系列handle*(方法处理后，NetworkClient.poll(0方 法中产生的全部
+     * ClientResponse已经被收集到responses列表中。之后，遍历responses调用每个
+     * ClientRequest中记录的回调，如果是异常响应则请求重发，如果是正常响应则调用每个
+     * 消息的自定义Callback。在前面的createProduceRequests()方法中提到过，这里调用的
+     * Callback回调对象，也就是RequestCompletionHandler对象，其onComplete(方法最终调
+     * 用Sender.handleProduceResponse()方法，其逻辑如下:
+     *  (1)如果因为断开连接或异常而产生的响应:
+     *      (a)遍历ClientRequest中的RecordBatch, 则尝试将RecordBatch重新加人RecordAccumulator,重新发送。
+     *      (b)如果异常类型不允许重试或重试次数达到上限，则执行RecordBatch.done()方法，此方法会循环调用RecordBatch
+     *         中每个消息的Callback函数，并将RecordBatch的produceFuture设置为“异常完成”。最后，
+     *         释放RecordBatch底层的ByteBuffer。
+     *      (c)最后，根据异常类型，决定是否设置更新Metadata标志。
+     * (2)如果是服务端正常的响应或不需要响应的情况:
+     *      (a)解析响应。
+     *      (b)遍历对应ClientRequest中的RecordBatch,执行RecordBatch.done(方法。
+     *      (c)释放RecordBatch底层的ByteBuffer。
      */
     private void handleProduceResponse(ClientResponse response, Map<TopicPartition, ProducerBatch> batches, long now) {
         RequestHeader requestHeader = response.requestHeader();
         long receivedTimeMs = response.receivedTimeMs();
         int correlationId = requestHeader.correlationId();
+        // 对于连接断开而产生的ClientResponse,会重试发送请求，若不能重试，则调用其中每
+        // 条消息的回调
         if (response.wasDisconnected()) {
             log.trace("Cancelled request with header {} due to node {} being disconnected",
                 requestHeader, response.destination());
@@ -586,11 +612,13 @@ public class Sender implements Runnable {
                     TopicPartition tp = entry.getKey();
                     ProduceResponse.PartitionResponse partResp = entry.getValue();
                     ProducerBatch batch = batches.get(tp);
+                    /** 调用completeBatch进行处理 */
                     completeBatch(batch, partResp, correlationId, now, receivedTimeMs + produceResponse.throttleTimeMs());
                 }
                 this.sensors.recordLatency(response.destination(), response.requestLatencyMs());
             } else {
                 // this is the acks = 0 case, just complete all requests
+                /** 不需要响应的请求，直接调用completeBatch进行处理 **/
                 for (ProducerBatch batch : batches.values()) {
                     completeBatch(batch, new ProduceResponse.PartitionResponse(Errors.NONE), correlationId, now, 0L);
                 }
@@ -626,6 +654,7 @@ public class Sender implements Runnable {
             this.accumulator.deallocate(batch);
             this.sensors.recordBatchSplit();
         } else if (error != Errors.NONE) {
+            // 可重试，重新添加到RecordAccumulator
             if (canRetry(batch, response, now)) {
                 log.warn(
                     "Got error produce response with correlation id {} on topic-partition {}, retrying ({} attempts left). Error: {}",
@@ -647,6 +676,7 @@ public class Sender implements Runnable {
                             transactionManager.producerIdAndEpoch().producerId + " in the mean time. This batch will be dropped."), false);
                 }
             } else if (error == Errors.DUPLICATE_SEQUENCE_NUMBER) {
+                // 不可重试，标记为“异常完成”，并且释放 RecordBatch
                 // If we have received a duplicate sequence error, it means that the sequence number has advanced beyond
                 // the sequence of the current batch, and we haven't retained batch metadata on the broker to return
                 // the correct offset and timestamp.
@@ -655,6 +685,7 @@ public class Sender implements Runnable {
                 completeBatch(batch, response);
             } else {
                 final RuntimeException exception;
+                /** 授权异常 **/
                 if (error == Errors.TOPIC_AUTHORIZATION_FAILED)
                     exception = new TopicAuthorizationException(batch.topicPartition.topic());
                 else if (error == Errors.CLUSTER_AUTHORIZATION_FAILED)
@@ -675,6 +706,7 @@ public class Sender implements Runnable {
                     log.warn("Received invalid metadata error in produce request on partition {} due to {}. Going " +
                             "to request metadata update now", batch.topicPartition, error.exception().toString());
                 }
+                /** 标识需要更新Metadata中记录的集群元数据 */
                 metadata.requestUpdate();
             }
         } else {
@@ -789,6 +821,7 @@ public class Sender implements Runnable {
             if (batch.magic() < minUsedMagic)
                 minUsedMagic = batch.magic();
         }
+        // 将发往某个broker上消息按TopicPartition进行归类
 
         for (ProducerBatch batch : batches) {
             TopicPartition tp = batch.topicPartition;
@@ -811,17 +844,23 @@ public class Sender implements Runnable {
         if (transactionManager != null && transactionManager.isTransactional()) {
             transactionalId = transactionManager.transactionalId();
         }
+        // 最新的版本，封装ProduceRequest，其中的有效负载就是produceRecordsByPartition
         ProduceRequest.Builder requestBuilder = ProduceRequest.Builder.forMagic(minUsedMagic, acks, timeout,
                 produceRecordsByPartition, transactionalId);
         RequestCompletionHandler callback = new RequestCompletionHandler() {
+            // 处理produce Response
             public void onComplete(ClientResponse response) {
                 handleProduceResponse(response, recordsByPartition, time.milliseconds());
             }
         };
 
         String nodeId = Integer.toString(destination);
+        // 实例化一个ClientRequest，这个Request时发往某个broker,不管一个Node对应有多少个ProducerBatch，
+        // 也不管是发给几个分区，每个Node至多生成一个ClientRequest
+        // 包含大于等于１个TopicPartition
         ClientRequest clientRequest = client.newClientRequest(nodeId, requestBuilder, now, acks != 0,
                 requestTimeoutMs, callback);
+        // 调用selector发送消息
         client.send(clientRequest, now);
         log.trace("Sent produce request to {}: {}", nodeId, requestBuilder);
     }

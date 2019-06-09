@@ -26,10 +26,19 @@ import java.util.concurrent.TimeoutException;
 
 /**
  * The future result of a record send
+ *
+ * Use JDK Future，虽然实现了Future接口，实际上是委托了ProduceRequestResult对应的方法<br>
+ * 可以看出，消息是按照ProducerBatch进行发送和确认的
  */
 public final class FutureRecordMetadata implements Future<RecordMetadata> {
 
+    /**
+     * 指向对应消息所在的ProducerBatch的produceFuture
+     */
     private final ProduceRequestResult result;
+    /**
+     * 记录了对应消息在ProducerBatch中的偏移量
+     */
     private final long relativeOffset;
     private final long createTimestamp;
     private final Long checksum;
@@ -59,8 +68,13 @@ public final class FutureRecordMetadata implements Future<RecordMetadata> {
         return false;
     }
 
+    /**
+     * 当生产者已经收到某消息的响应时，FutureRecordMetadata的方法就会返回RecordMetadata对象,通过get()
+     * 方法阻塞等待返回结果
+     */
     @Override
     public RecordMetadata get() throws InterruptedException, ExecutionException {
+        // 依赖ProduceRequestResult实现Future功能,先阻塞住,能继续向下执行，说明收到server端的应答了
         this.result.await();
         if (nextRecordMetadata != null)
             return nextRecordMetadata.get();

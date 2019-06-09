@@ -34,6 +34,8 @@ import java.util.List;
  * communication.
  *
  * This class is not thread-safe!
+ *
+ * 空实现
  */
 public class ManualMetadataUpdater implements MetadataUpdater {
 

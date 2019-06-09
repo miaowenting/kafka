@@ -29,6 +29,8 @@ import java.util.List;
  * from such metadata. This is an internal class.
  * <p>
  * This class is not thread-safe!
+ *
+ * MetadataUpdater接口是一- 个辅助NetworkClient更新的Metadata的接口，它有3个实现类
  */
 public interface MetadataUpdater extends Closeable {
 

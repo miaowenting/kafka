@@ -47,17 +47,38 @@ public class MemoryRecordsBuilder implements AutoCloseable {
     });
 
     private final TimestampType timestampType;
+    /**
+     * 对消息数据进行压缩的压缩器类型，目前KafkaProducer支持GZIP、SNAPPY、LZ4三种压缩方式
+     */
     private final CompressionType compressionType;
     // Used to hold a reference to the underlying ByteBuffer so that we can write the record batch header and access
     // the written bytes. ByteBufferOutputStream allocates a new ByteBuffer if the existing one is not large enough,
     // so it's not safe to hold a direct reference to the underlying ByteBuffer.
+    /**
+     *
+     * 在ByteBufferbuffer基础上建立的ByteBufferOutputStream，Kafka自己提供实现，
+     * 继承java.io.OutputStream,封装了Buffer，当写入数据超出ByteBuffer容量时，
+     * ByteBufferOutputStream会自动扩容。
+     */
     private final ByteBufferOutputStream bufferStream;
+    /**
+     *  版本
+     */
     private final byte magic;
     private final int initialPosition;
+    /**
+     * 起始位移
+     */
     private final long baseOffset;
     private final long logAppendTime;
     private final boolean isControlBatch;
+    /**
+     * 分区leader版本号
+     */
     private final int partitionLeaderEpoch;
+    /**
+     * 设置buffer字段最多可以写入多少字节
+     */
     private final int writeLimit;
     private final int batchHeaderSizeInBytes;
 
@@ -66,6 +87,9 @@ public class MemoryRecordsBuilder implements AutoCloseable {
     private float estimatedCompressionRatio = 1.0F;
 
     // Used to append records, may compress data on the fly
+    /**
+     * 对bufferStream进行了一层装饰，为其添加了压缩的功能
+     */
     private DataOutputStream appendStream;
     private boolean isTransactional;
     private long producerId;
@@ -82,6 +106,9 @@ public class MemoryRecordsBuilder implements AutoCloseable {
     private MemoryRecords builtRecords;
     private boolean aborted = false;
 
+    /**
+     * 构造V2版本的RecordBatch
+     */
     public MemoryRecordsBuilder(ByteBufferOutputStream bufferStream,
                                 byte magic,
                                 CompressionType compressionType,
@@ -300,7 +327,11 @@ public class MemoryRecordsBuilder implements AutoCloseable {
         this.isTransactional = isTransactional;
     }
 
-
+    /**
+     * 出现ByteBuffer扩容的情况时，MemoryRecords.buffer字段与ByteBufferOutputStream.
+     * buffer字段所指向的不再是同一个ByteBuffer对象。
+     * close()方法中会将MemoryRecords.buffer字段指向扩容后的BYteBuffer对象
+     */
     public void close() {
         if (aborted)
             throw new IllegalStateException("Cannot close MemoryRecordsBuilder as it has already been aborted");
@@ -626,8 +657,11 @@ public class MemoryRecordsBuilder implements AutoCloseable {
     private void appendDefaultRecord(long offset, long timestamp, ByteBuffer key, ByteBuffer value,
                                      Header[] headers) throws IOException {
         ensureOpenForRecordAppend();
+        // 消息位移与所属record batch起始位移的差值
         int offsetDelta = (int) (offset - baseOffset);
+        // 消息时间戳与所属record batch起始时间戳的差值
         long timestampDelta = timestamp - firstTimestamp;
+        // 计算字节大小
         int sizeInBytes = DefaultRecord.writeTo(appendStream, offsetDelta, timestampDelta, key, value, headers);
         recordWritten(offset, timestamp, sizeInBytes);
     }
@@ -638,6 +672,7 @@ public class MemoryRecordsBuilder implements AutoCloseable {
             timestamp = logAppendTime;
 
         int size = LegacyRecord.recordSize(magic, key, value);
+        // batch前面添加日志项头部，包括offset和size
         AbstractLegacyRecordBatch.writeHeader(appendStream, toInnerOffset(offset), size);
 
         if (timestampType == TimestampType.LOG_APPEND_TIME)
@@ -686,6 +721,12 @@ public class MemoryRecordsBuilder implements AutoCloseable {
     /**
      * Get an estimate of the number of bytes written (based on the estimation factor hard-coded in {@link CompressionType}.
      * @return The estimated number of bytes written
+     *
+     * 根据指定的压缩方式的压缩率estimatedCompressionRatio、
+     *         写入的未压缩数据的字节数writtenUncompressed、
+     *         估算因子COMPRESSION_RATE_ESTIMATION_FACTOR，
+     *         估计已写入的（压缩后）的字节数，此方法主要用在判断MemoryRecords是否写满的逻辑中使用。
+
      */
     private int estimatedBytesWritten() {
         if (compressionType == CompressionType.NONE) {
@@ -718,6 +759,11 @@ public class MemoryRecordsBuilder implements AutoCloseable {
      * Note that the return value is based on the estimate of the bytes written to the compressor, which may not be
      * accurate if compression is used. When this happens, the following append may cause dynamic buffer
      * re-allocation in the underlying byte buffer stream.
+     *
+     *
+     * 根据估算的已写入的字节数，估计MemoryRecords剩余空间是否足够写入指定的数据。
+     * 注意，这里仅仅是估算，所以不一定准确，通过hasRoomFor()方法判断之后写入数据，
+     * 也可能会导致底层ByteBuffer出现扩容。
      */
     public boolean hasRoomFor(long timestamp, ByteBuffer key, ByteBuffer value, Header[] headers) {
         if (isFull())

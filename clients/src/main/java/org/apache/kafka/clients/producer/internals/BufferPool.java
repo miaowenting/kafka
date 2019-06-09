@@ -40,17 +40,42 @@ import org.apache.kafka.common.utils.Time;
  * prevents starvation or deadlock when a thread asks for a large chunk of memory and needs to block until multiple
  * buffers are deallocated.
  * </ol>
+ *
+ * ByteBuffer的创建和释放是比较消耗资源的，为了实现内存的高效利用，基本上每个成熟的框架或工具都有一套内存管理机制。
+ * Kafka客户端使用BufferPool来实现ByteBuffer的复用。
+ *
+ * 每个ByteBuffer只针对特定大小（poolableSize）的ByteBuffer进行管理，
+ * 对于其他大小的ByteBuffer并不会缓存进BufferPool。
+ * 一般情况下，我们会调整MemoryRecords的大小（RecordAccumulator.batchSize字段指定），
+ * 使每个MemoryRecords可以缓存多条消息。
+ * 但也有例外情况，当一条消息的字节数大于MemoryRecords时，就不会复用BufferPool中缓存的ByteBuffer，
+ * 而是额外分配ByteBuffer， 在它使用完之后也不会放入BufferPool进行管理，而是直接丢弃由GC回收。
+ *
  */
 public class BufferPool {
 
     static final String WAIT_TIME_SENSOR_NAME = "bufferpool-wait-time";
 
+    /**
+     * 记录了整个BufferPool的大小
+     */
     private final long totalMemory;
     private final int poolableSize;
+    /**
+     * 因为有多线程并发分配和回收ByteBuffer，所以使用锁控制并发，保证线程安全
+     */
     private final ReentrantLock lock;
+    /**
+     * ArrayDeque<ByteBuffer>队列，缓存了指定大小的ByteBuffer对象
+     */
     private final Deque<ByteBuffer> free;
+    /**
+     * 记录因申请不到足够空间而阻塞的线程，此队列中实际记录的是阻塞线程对应的Condition对象
+     */
     private final Deque<Condition> waiters;
-    /** Total available memory is the sum of nonPooledAvailableMemory and the number of byte buffers in free * poolableSize.  */
+    /** Total available memory is the sum of nonPooledAvailableMemory and the number of byte buffers in free * poolableSize.
+     * 记录了可用空间的大小，这个空间是totalMemory减去free列表中全部ByteBuffer的大小
+     * */
     private long nonPooledAvailableMemory;
     private final Metrics metrics;
     private final Time time;
@@ -103,6 +128,7 @@ public class BufferPool {
                                                + " on memory allocations.");
 
         ByteBuffer buffer = null;
+        // 加锁同步
         this.lock.lock();
         try {
             // check if we have a free buffer of the right size pooled
@@ -111,21 +137,27 @@ public class BufferPool {
 
             // now check if the request is immediately satisfiable with the
             // memory on hand or if we need to block
+            // 当申请空间不是poolableSize时，free队列中都是poolableSize大小的ByteBuffer，可以直接计算整个free队列的空间
             int freeListSize = freeSize() * this.poolableSize;
             if (this.nonPooledAvailableMemory + freeListSize >= size) {
                 // we have enough unallocated or pooled memory to immediately
                 // satisfy the request, but need to allocate the buffer
+                // 为了让availableMemory>size,freeUp()方法会从free队列中不断释放ByteBuffer，
+                // 直到availableMemory满足这次申请
                 freeUp(size);
                 this.nonPooledAvailableMemory -= size;
             } else {
                 // we are out of memory and will have to block
+                // 没有足够空间，只能阻塞了
                 int accumulated = 0;
+                // 将Condition添加到waiters中
                 Condition moreMemory = this.lock.newCondition();
                 try {
                     long remainingTimeToBlockNs = TimeUnit.MILLISECONDS.toNanos(maxTimeToBlockMs);
                     this.waiters.addLast(moreMemory);
                     // loop over and over until we have a buffer or have reserved
                     // enough memory to allocate one
+                    // 循环等待
                     while (accumulated < size) {
                         long startWaitNs = time.nanoseconds();
                         long timeNs;
@@ -135,9 +167,11 @@ public class BufferPool {
                         } finally {
                             long endWaitNs = time.nanoseconds();
                             timeNs = Math.max(0L, endWaitNs - startWaitNs);
+                            // 统计阻塞时间
                             recordWaitTime(timeNs);
                         }
 
+                        // 超时，报错
                         if (waitingTimeElapsed) {
                             throw new TimeoutException("Failed to allocate memory within the configured max blocking time " + maxTimeToBlockMs + " ms.");
                         }
@@ -146,6 +180,7 @@ public class BufferPool {
 
                         // check if we can satisfy this request from the free list,
                         // otherwise allocate memory
+                        // 请求的是poolableSize的ByteBuffer，且free中有空闲的ByteBuffer
                         if (accumulated == 0 && size == this.poolableSize && !this.free.isEmpty()) {
                             // just grab a buffer from the free list
                             buffer = this.free.pollFirst();
@@ -153,6 +188,7 @@ public class BufferPool {
                         } else {
                             // we'll need to allocate memory, but we may only get
                             // part of what we need on this iteration
+                            // 先分配一部分空间，并继续等待空闲时间
                             freeUp(size - accumulated);
                             int got = (int) Math.min(size - accumulated, this.nonPooledAvailableMemory);
                             this.nonPooledAvailableMemory -= got;
@@ -172,9 +208,11 @@ public class BufferPool {
             // over for them
             try {
                 if (!(this.nonPooledAvailableMemory == 0 && this.free.isEmpty()) && !this.waiters.isEmpty())
+                    // 要是还有空闲空间，就唤醒下一个线程
                     this.waiters.peekFirst().signal();
             } finally {
                 // Another finally... otherwise find bugs complains
+                // 解锁
                 lock.unlock();
             }
         }
@@ -237,18 +275,23 @@ public class BufferPool {
      *             since the buffer may re-allocate itself during in-place compression
      */
     public void deallocate(ByteBuffer buffer, int size) {
+        // 加锁
         lock.lock();
         try {
+            // 释放ByteBuffer的大小是poolableSize，放入free队列中进行管理
             if (size == this.poolableSize && size == buffer.capacity()) {
                 buffer.clear();
                 this.free.add(buffer);
             } else {
+                // 释放的ByteBuffer的大小不是poolableSize，不会复用ByteBuffer，仅修改availableMemory的值
                 this.nonPooledAvailableMemory += size;
             }
             Condition moreMem = this.waiters.peekFirst();
             if (moreMem != null)
+                // 唤醒一个因空间不足而阻塞的线程
                 moreMem.signal();
         } finally {
+            // 释放锁
             lock.unlock();
         }
     }

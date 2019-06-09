@@ -28,14 +28,33 @@ import java.util.concurrent.TimeUnit;
  * A class that models the future completion of a produce request for a single partition. There is one of these per
  * partition in a produce request and it is shared by all the {@link RecordMetadata} instances that are batched together
  * for the same partition in the request.
+ *
+ *  ProduceRequestResult 并未实现java.util.concurrent.Future接口，但是其通过包含一个count值为1的CountDownLatch对象，
+ *  实现了类似于Future的功能
+ *
+ *  当RecordBatch中全部的消息被正常响应、或超时、或关闭生产者时，会调用ProduceRequestResult.done（）方法，
+ *  将produceFuture标记为完成并通过ProduceRequestResult.error字段区分“异常完成”还是“正常完成”，之后调用CountDownLatch对象的
+ *  countDown(方法。此时，会唤醒阻塞在CountDownI atch对象的await(方法的线程(这些线程通过ProduceRequestResult的await方法等待上述三个事件的发生)。
  */
 public class ProduceRequestResult {
 
+    /**
+     * 包含了一个count值为1的CountDownLatch对象，用于实现与Future类似的功能
+     */
     private final CountDownLatch latch = new CountDownLatch(1);
     private final TopicPartition topicPartition;
 
+    /**
+     *  服务端为此ProducerBatch中的第一条消息分配的offset
+     *  在ProduceRequestResult中还有一个需要注意的字段baseOfset,表示的是服务端为此RecordBatch中第一- 条
+     *  消息分配的offset,这样每个消息可以根据此offset以及自身在此RecordBatch中的相对偏移量，计算出其在服务端分区中
+     *  的偏移量了。
+     */
     private volatile Long baseOffset = null;
     private volatile long logAppendTime = RecordBatch.NO_TIMESTAMP;
+    /**
+     * 区分异常完成还是正常完成
+     */
     private volatile RuntimeException error;
 
     /**
@@ -62,10 +81,15 @@ public class ProduceRequestResult {
 
     /**
      * Mark this request as complete and unblock any threads waiting on its completion.
+     *
+     * ProducerBatch中全部的消息被正常响应、或超时、或关闭生产者时，会调用done()释放锁，将produceFuture标记为已完成，
+     * 并通过ProduceRequestResult.error字段区分“异常完成”还是“正常完成”
      */
     public void done() {
         if (baseOffset == null)
             throw new IllegalStateException("The method `set` must be invoked before this method.");
+
+        // 醒阻塞在CountDownLatch对象的线程
         this.latch.countDown();
     }
 
@@ -73,6 +97,7 @@ public class ProduceRequestResult {
      * Await the completion of this request
      */
     public void await() throws InterruptedException {
+        // 外部线程通过await方法等待ProducerBatch中全部的消息被正常响应、或超时、或关闭生产者三个事件的发生
         latch.await();
     }
 

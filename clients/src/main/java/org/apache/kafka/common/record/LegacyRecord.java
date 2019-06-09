@@ -468,10 +468,13 @@ public final class LegacyRecord {
 
         // write the key
         if (key == null) {
+            // 没有key则将key的长度设置为-1
             out.writeInt(-1);
         } else {
             int size = key.remaining();
+            // key的长度
             out.writeInt(size);
+            // key的值
             Utils.writeTo(out, key, size);
         }
         // write the value

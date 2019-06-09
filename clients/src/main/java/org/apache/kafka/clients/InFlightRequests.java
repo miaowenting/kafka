@@ -27,6 +27,12 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * The set of requests which have been sent or are being sent but haven't yet received a response
+ *
+ * InFlightRequests队列的主要作用是缓存了已经发出去但没收到响应的ClientRequest。
+ * 其底层是通过一个Map<String, Deque<ClientRequest>> 对象实现的，key 是Nodeld,
+ * value是发送到对应Node的ClientRequest对象集合。InFlightRequests 提供了很多管理这
+ * 个缓存队列的方法，还通过配置参数，限制了每个连接最多缓存的ClientRequest个数。
+ *
  */
 final class InFlightRequests {
 
@@ -49,6 +55,7 @@ final class InFlightRequests {
             reqs = new ArrayDeque<>();
             this.requests.put(destination, reqs);
         }
+        // 增加至对头
         reqs.addFirst(request);
         inFlightRequestCount.incrementAndGet();
     }
@@ -96,9 +103,22 @@ final class InFlightRequests {
      *
      * @param node Node in question
      * @return true iff we have no requests still being sent to the given node
+     *
+     * 队头的请求发送不出去，可能网络出现问题。队头的消息与对应的KafkaChannel.send字段指向的是同一个消息。
+     * 还需判断InFlightRequests队列中是否堆积过多请求
      */
     public boolean canSendMore(String node) {
         Deque<NetworkClient.InFlightRequest> queue = requests.get(node);
+        /**
+         * queue = null和queue.isEmpty0这两个条件比较容易理解，不再赘述，queue.peekFirst0.
+         requsl0.completed0这个条件为true表示当前队头的请求已经发送完成，如果队头的请求迟
+         迟发送不出去，可能是网络出现问题，则不能继续向此Node发送请求。此外，队头的消息
+         与对应KafkaChannel.send字段指向的是同-一个消息，为了避免未发送的消息被覆盖，也不
+         能让KafkaChannel.send字段指向新请求。最后queue.size( < this.maxInFlightRequestsPerConn
+         ection)条件则是为了判断InFlightRequests队列中是否堆积过多请求。如果Node已经堆积了
+         很多未响应的请求，说明这个节点负载可能较大或是网络连接有问题，继续向其发送请求，
+         则可能导致请求超时。
+         */
         return queue == null || queue.isEmpty() ||
                (queue.peekFirst().send.completed() && queue.size() < this.maxInFlightRequestsPerConnection);
     }

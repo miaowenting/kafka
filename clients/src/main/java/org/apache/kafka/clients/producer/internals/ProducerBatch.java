@@ -59,20 +59,50 @@ public final class ProducerBatch {
     private enum FinalState { ABORTED, FAILED, SUCCEEDED }
 
     final long createdMs;
+    /**
+     * 当前ProducerBatch中缓存的消息都会发送给此TopicPartition
+     */
     final TopicPartition topicPartition;
+    /**
+     * 标识ProducerBatch状态的Future对象
+     */
     final ProduceRequestResult produceFuture;
 
+    /**
+     * 消息的回调对象队列
+     */
     private final List<Thunk> thunks = new ArrayList<>();
+    /**
+     * 具体存放消息数据的地方
+     */
     private final MemoryRecordsBuilder recordsBuilder;
+    /**
+     * 尝试发送当前ProducerBatch的次数
+     */
     private final AtomicInteger attempts = new AtomicInteger(0);
     private final boolean isSplitBatch;
     private final AtomicReference<FinalState> finalState = new AtomicReference<>(null);
 
+    /**
+     * 保存Record的个数
+     */
     int recordCount;
+    /**
+     * 最大Record字节数
+     */
     int maxRecordSize;
+    /**
+     * 最后一次尝试发送的时间戳
+     */
     private long lastAttemptMs;
+    /**
+     * 最后一次向此Batch追加消息的时间戳
+     */
     private long lastAppendTime;
     private long drainedMs;
+    /**
+     * 是否正在重试
+     */
     private boolean retry;
     private boolean reopened;
 
@@ -98,15 +128,21 @@ public final class ProducerBatch {
      * Append the record to the current record set and return the relative offset within that record set
      *
      * @return The RecordSend corresponding to this record or null if there isn't sufficient room.
+     *
+     * 尝试将消息添加到当前的ProducerBatch中缓存
      */
     public FutureRecordMetadata tryAppend(long timestamp, byte[] key, byte[] value, Header[] headers, Callback callback, long now) {
+        // 估算剩余空间是否充足，这不是一个准确值
         if (!recordsBuilder.hasRoomFor(timestamp, key, value, headers)) {
             return null;
         } else {
+            // 向MemoryRecords中添加消息
             Long checksum = this.recordsBuilder.append(timestamp, key, value, headers);
             this.maxRecordSize = Math.max(this.maxRecordSize, AbstractRecords.estimateSizeInBytesUpperBound(magic(),
                     recordsBuilder.compressionType(), key, value, headers));
+            // 更新lastAppendTime字段
             this.lastAppendTime = now;
+            // 创建FutureRecordMetadata对象
             FutureRecordMetadata future = new FutureRecordMetadata(this.produceFuture, this.recordCount,
                                                                    timestamp, checksum,
                                                                    key == null ? -1 : key.length,
@@ -114,8 +150,11 @@ public final class ProducerBatch {
                                                                    Time.SYSTEM);
             // we have to keep every future returned to the users in case the batch needs to be
             // split to several new batches and resent.
+            // 将用户自定义的Callback和FutureRecordMetadata封装成Thunk，保存到thunks集合中
             thunks.add(new Thunk(callback, future));
+            // 更新recordCount
             this.recordCount++;
+            // 返回FutureRecordMetadata对象
             return future;
         }
     }
@@ -214,19 +253,31 @@ public final class ProducerBatch {
         return false;
     }
 
+    /**
+     * 会回调ProducerBatch中全部消息的Callback回调，并调用其produceFuture字段的done()方法
+     *
+     * @param baseOffset
+     * @param logAppendTime
+     * @param exception
+     */
     private void completeFutureAndFireCallbacks(long baseOffset, long logAppendTime, RuntimeException exception) {
         // Set the future before invoking the callbacks as we rely on its state for the `onCompletion` call
         produceFuture.set(baseOffset, logAppendTime, exception);
 
         // execute callbacks
+        // 循环执行每个消息的Callback
         for (Thunk thunk : thunks) {
             try {
+                // 正常执行完
                 if (exception == null) {
+                    // 从FutureRecordMetadata对象中获得信息构造RecordMetadata
                     RecordMetadata metadata = thunk.future.value();
                     if (thunk.callback != null)
+                        // 调用消息对应的自定义Callback
                         thunk.callback.onCompletion(metadata, null);
                 } else {
                     if (thunk.callback != null)
+                        // 处理过程中出现异常情况，第一个参数为null
                         thunk.callback.onCompletion(null, exception);
                 }
             } catch (Exception e) {
@@ -234,6 +285,7 @@ public final class ProducerBatch {
             }
         }
 
+        // 标识整个ProducerBatch处理完成，唤醒阻塞在countDownLatch上的线程，生产者发送消息可能使用了同步方式get()方法。
         produceFuture.done();
     }
 
@@ -309,8 +361,15 @@ public final class ProducerBatch {
 
     /**
      * A callback and the associated FutureRecordMetadata argument to pass to it.
+     *
+     * Callback对象作为回调)。RecordBatch.thunks字段可以理解为消息的回调对象队列，
+     * Thunk中的callback字段就指向对应消息的Callback对象，其另一个字段future是
+     * FutureRecordMetadata类型。
      */
     final private static class Thunk {
+        /**
+         * 针对单个消息的Callback对象，用户在调用KafkaProducer.send()方法时自定义的
+         */
         final Callback callback;
         final FutureRecordMetadata future;
 
