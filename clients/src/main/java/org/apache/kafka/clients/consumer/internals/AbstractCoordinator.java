@@ -1063,6 +1063,12 @@ public abstract class AbstractCoordinator implements Closeable {
     protected abstract class CoordinatorResponseHandler<R, T> extends RequestFutureAdapter<ClientResponse, T> {
         protected ClientResponse response;
 
+        /**
+         * 解析后的相应进行处理
+         *
+         * @param response
+         * @param future
+         */
         public abstract void handle(R response, RequestFuture<T> future);
 
         @Override
@@ -1071,6 +1077,7 @@ public abstract class AbstractCoordinator implements Closeable {
             if (e instanceof DisconnectException) {
                 markCoordinatorUnknown(true);
             }
+            // 调用adapted对象的raise()方法
             future.raise(e);
         }
 
@@ -1079,7 +1086,9 @@ public abstract class AbstractCoordinator implements Closeable {
         public void onSuccess(ClientResponse clientResponse, RequestFuture<T> future) {
             try {
                 this.response = clientResponse;
+                // 解析 ClientResponse
                 R responseObj = (R) clientResponse.responseBody();
+                // 调用handle() 方法进行处理，子类实现
                 handle(responseObj, future);
             } catch (RuntimeException e) {
                 if (!future.isDone())
@@ -1209,12 +1218,25 @@ public abstract class AbstractCoordinator implements Closeable {
                         client.pollNoWakeup();
                         long now = time.milliseconds();
 
-                        // 检查是否要发送心跳请求
+                        /** 检查是否要发送心跳请求
+                            (1)首先检查是否需要发送HeartbeatRequest, 条件有多个:
+                                1. GroupCoordinator 已确定且已连接;
+                                2. 不处于正在等待Partition分配结果的状态;
+                                3. 之前的 HeartbeatRequest请求正常收到响应且没有过期。
+                            如果不符合条件，则不再执行HeartbeatTask,等待后续调用reset()方法重启HeartbeatTask任务。
+                         */
                         if (coordinatorUnknown()) {
                             if (findCoordinatorFuture != null || lookupCoordinator().failed())
                                 // the immediate future check ensures that we backoff properly in the case that no
                                 // brokers are available to connect to.
                                 AbstractCoordinator.this.wait(retryBackoffMs);
+
+                        /**
+                         *  调用Heartbeat.sessionTimeoutExpired()方法，检测HeartbeatResponse是否超时。
+                         *  若超时，则认为GroupCoordinator宕机，调用markCoordinatorUnknown()方法清空其unsent集合中
+                         *  对应的请求队列并将这些请求标记为异常后结束，将coordinator字段设置为null,表示将
+                         *  重新选择GroupCoordinator。同时还会停止HeartbeatTask的执行。
+                         */
                         } else if (heartbeat.sessionTimeoutExpired(now)) {
                             // session超时，Consumer发现heartbeat返回超时，认为GroupCoordinator宕机
                             // the session timeout has expired without seeing a successful heartbeat, so we should
@@ -1223,7 +1245,6 @@ public abstract class AbstractCoordinator implements Closeable {
                             // 会重新进行FCR、JGR、SGR3个步骤
                             markCoordinatorUnknown();
                         } else if (heartbeat.pollTimeoutExpired(now)) {
-                            // 没有到发送心跳请求的时间
 
                             // the poll timeout has expired, which means that the foreground thread has stalled
                             // in between calls to poll(), so we explicitly leave the group.
@@ -1234,6 +1255,9 @@ public abstract class AbstractCoordinator implements Closeable {
                                     "max.poll.interval.ms or by reducing the maximum size of batches returned in poll() " +
                                     "with max.poll.records.");
                             maybeLeaveGroup();
+                        /**
+                         *  没有到发送心跳请求的时间
+                         */
                         } else if (!heartbeat.shouldHeartbeat(now)) {
                             // poll again after waiting for the retry backoff in case the heartbeat failed or the
                             // coordinator disconnected
