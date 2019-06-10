@@ -104,8 +104,22 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
     private Set<String> joinedSubscription;
     /**
      * 用来存储Metadata的快照信息，检测Topic是否发生了分区数量的变化
+     * metadataSnapshot: 用来存储Metadata 的快照信息，主要用来检测Topic是否发生
+     * 了分区数量的变化。在ConsumerCoordinator的构造方法中，会为Metadata添加一
+     * 个监听器，当Metadata更新时会做下面几件事。
+     *      1. 如果是AUTO PATTERN模式，则使用用户自定义的正则表达式过滤Topic,得到需要订阅的Topic集合后，设置到SubscriptionState
+     *         的subscription集合和groupSubscription集合中。
+     *      2. 如果是AUTO_ PATTERN或AUTO _TOPICS 模式，为当前Metadata做-个快照，这个快照底层是使用HashMap记录每个Topic中Parition
+     *          的个数。将新旧快照进行比较，发生变化的话，则表示消费者订阅的Topic 发生分区数量变化，则将SubscriptionState的
+     *          needsParitionAssignment字段置为true,需要重新进行分区分配。
+     *      3. 使用metadataSnapshot字段记录变化后的新快照。
      */
     private MetadataSnapshot metadataSnapshot;
+    /**
+     * assignmentSnapshot:也是用来存储Metadata的快照信息，不过是用来检测Partition分配的过程中有没有发生分区数量变化。
+     * 具体是在Leader消费者开始分区分配操作前，使用此字段记录Metadata快照;收到SyncGroupResponse后，会比较此字段记录的快照与
+     * 当前Metadata是否发生变化。如果发生变化，则要重新进行分区分配。
+     */
     private MetadataSnapshot assignmentSnapshot;
     private Timer nextAutoCommitTimer;
     private AtomicBoolean asyncCommitFenced;

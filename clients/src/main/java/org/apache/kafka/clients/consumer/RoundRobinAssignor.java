@@ -56,6 +56,8 @@ import java.util.TreeSet;
  * <li><code>C1: [t1p0]</code>
  * <li><code>C2: [t1p1, t2p0, t2p1, t2p2]</code>
  * </ul>
+ *
+ * RoundRobinAssignor 原理是:将所有Topic的Partition按照字典序排列，然后对每个Consumer进行轮询分配。
  */
 public class RoundRobinAssignor extends AbstractPartitionAssignor {
 

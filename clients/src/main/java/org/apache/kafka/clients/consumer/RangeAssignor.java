@@ -40,6 +40,9 @@ import java.util.Map;
  * <li><code>C0: [t0p0, t0p1, t1p0, t1p1]</code></li>
  * <li><code>C1: [t0p2, t1p2]</code></li>
  * </ul>
+ *
+ *  RangeAssignor実現原理是:針対毎个Topic,
+ *      n=分区数/消費者数量, m=分区数%消費者数量，前m个消費者毎个分配n+1个分区，后面的(消費者数量-m)个消費者毎个分配n个Partition。
  */
 public class RangeAssignor extends AbstractPartitionAssignor {
 

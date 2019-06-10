@@ -31,6 +31,8 @@ import java.util.Set;
 /**
  * Abstract assignor implementation which does some common grunt work (in particular collecting
  * partition counts which are always needed in assignors).
+ *
+ * 简化PartitionAssignor接口的实现，将Subscription的userData去除掉，再进行分区分配
  */
 public abstract class AbstractPartitionAssignor implements PartitionAssignor {
     private static final Logger log = LoggerFactory.getLogger(AbstractPartitionAssignor.class);
@@ -53,18 +55,25 @@ public abstract class AbstractPartitionAssignor implements PartitionAssignor {
     @Override
     public Map<String, Assignment> assign(Cluster metadata, Map<String, Subscription> subscriptions) {
         Set<String> allSubscribedTopics = new HashSet<>();
-        for (Map.Entry<String, Subscription> subscriptionEntry : subscriptions.entrySet())
+        /**
+         * 解析subscriptions集合，去除userData
+         */
+        for (Map.Entry<String, Subscription> subscriptionEntry : subscriptions.entrySet()) {
             allSubscribedTopics.addAll(subscriptionEntry.getValue().topics());
+        }
 
         Map<String, Integer> partitionsPerTopic = new HashMap<>();
         for (String topic : allSubscribedTopics) {
             Integer numPartitions = metadata.partitionCountForTopic(topic);
-            if (numPartitions != null && numPartitions > 0)
+            // 统计每个Topic的分区个数
+            if (numPartitions != null && numPartitions > 0) {
                 partitionsPerTopic.put(topic, numPartitions);
-            else
+            } else {
                 log.debug("Skipping assignment for topic {} since no metadata is available", topic);
+            }
         }
 
+        // 将分区分配的具体逻辑交给了assign()重载，由子类实现，RangeAssignor、RoundRobinAssignor
         Map<String, List<TopicPartition>> rawAssignments = assign(partitionsPerTopic, subscriptions);
 
         // this class maintains no user data, so just wrap the results

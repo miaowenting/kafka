@@ -26,6 +26,14 @@ import org.apache.kafka.common.protocol.types.Struct;
 import java.nio.ByteBuffer;
 
 
+/**
+ * HeartbeatRequest 的消息体格式比较简单，依次包含
+ *  group id ( String)、
+ *  group generation id (int)、
+ *  member_ id ( String)
+ *  三个字段。
+ *  HeartbeatResponse消息体只包含一个short类型的error _code。
+ */
 public class HeartbeatRequest extends AbstractRequest {
 
     public static class Builder extends AbstractRequest.Builder<HeartbeatRequest> {
